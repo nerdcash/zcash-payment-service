@@ -11,31 +11,31 @@ resolver = "2"
 anyhow = "1"
 axum = { version = "0.8", features = ["macros"] }
 hex = "0.4"
-hmac = "0.12"
+hmac = "0.13"
 http = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
-time = { version = "=0.3.36", features = ["formatting", "parsing"] }
+time = { version = "=0.3.47", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 tonic = { version = "0.14.5", features = ["transport", "tls-webpki-roots"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "87c0a882a197f3a6b82ff6cad9c62a291a435844", features = ["orchard", "lightwalletd-tonic-transport"] }
-zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "87c0a882a197f3a6b82ff6cad9c62a291a435844", features = ["orchard"] }
-zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "87c0a882a197f3a6b82ff6cad9c62a291a435844", features = ["std", "orchard", "sapling"] }
-zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "87c0a882a197f3a6b82ff6cad9c62a291a435844" }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "87c0a882a197f3a6b82ff6cad9c62a291a435844" }
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash.git", rev = "2c4e6c769c2e70e71f14c9cf95f2dccfdb7ef239", features = ["orchard", "lightwalletd-tonic-transport"] }
+zcash_client_sqlite = { git = "https://github.com/zcash/librustzcash.git", rev = "2c4e6c769c2e70e71f14c9cf95f2dccfdb7ef239", features = ["orchard"] }
+zcash_keys = { git = "https://github.com/zcash/librustzcash.git", rev = "2c4e6c769c2e70e71f14c9cf95f2dccfdb7ef239", features = ["std", "orchard", "sapling"] }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash.git", rev = "2c4e6c769c2e70e71f14c9cf95f2dccfdb7ef239" }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash.git", rev = "2c4e6c769c2e70e71f14c9cf95f2dccfdb7ef239" }
 zip32 = "0.2"
 sapling = { package = "sapling-crypto", version = "0.7.0" }
-orchard = "0.13.0"
+orchard = "0.14.0"
 zcash_note_encryption = "0.4.1"
 incrementalmerkletree = "0.8"
-rand_core = "0.6"
+rand_core = "0.10"
 subtle = "2"
 
 [dev-dependencies]
