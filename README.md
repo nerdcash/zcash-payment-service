@@ -109,7 +109,7 @@ signature before mutating business state.
 
 ## Consuming the Docker image
 
-The repository includes a publish workflow that pushes:
+The combined CI workflow pushes these images after the checks pass on `main`:
 
 - `ghcr.io/nerdcash/zcash-payment-service:<git-sha>`
 - `ghcr.io/nerdcash/zcash-payment-service:main`
