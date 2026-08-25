@@ -2,7 +2,7 @@ ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 ARG TARGETARCH
 
-FROM --platform=$BUILDPLATFORM rust:1.96-bookworm@sha256:13c186980fa33cc12759b429662a1322939dbe697484b7c33b47dd2698d28460 AS builder
+FROM --platform=$BUILDPLATFORM rust:1.98-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS builder
 
 ARG TARGETARCH
 
@@ -25,7 +25,7 @@ RUN build_arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
 	&& cargo build --release --manifest-path Cargo.toml --target "$RUST_TARGET" \
 	&& cp "target/$RUST_TARGET/release/zcash-payment-service" /tmp/zcash-payment-service
 
-FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 WORKDIR /app
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
