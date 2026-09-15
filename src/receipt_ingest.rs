@@ -148,6 +148,11 @@ mod tests {
                         receiver_encoding: "orchard-1",
                         receiver_fingerprint: &[8, 7, 6, 5, 4, 3, 2, 1],
                     },
+                    NewAddressReceiver {
+                        pool: "ironwood",
+                        receiver_encoding: "orchard-1",
+                        receiver_fingerprint: &[8, 7, 6, 5, 4, 3, 2, 1],
+                    },
                 ],
             )
             .unwrap();

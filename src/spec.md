@@ -164,7 +164,8 @@ Allocates a Zcash payment destination and returns QR-friendly text.
 - `qr_text` may include URL-encoded `amount`, `memo`, and `message` query
   params.
 - Fresh address allocation derives a new unified address from the canonical
-  UIVK and persists its diversifier metadata and shielded receiver fingerprints.
+  UIVK and persists its diversifier metadata and shielded receiver fingerprints
+  for Sapling, Orchard, and Ironwood. Ironwood reuses the Orchard receiver.
 
 #### `400 Bad Request`
 

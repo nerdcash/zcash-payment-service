@@ -135,6 +135,11 @@ impl PaymentService {
                         receiver_fingerprint: receiver_fingerprint(&derived.orchard_receiver),
                     },
                     OwnedAddressReceiver {
+                        pool: "ironwood".into(),
+                        receiver_encoding: hex_string(&derived.orchard_receiver),
+                        receiver_fingerprint: receiver_fingerprint(&derived.orchard_receiver),
+                    },
+                    OwnedAddressReceiver {
                         pool: "sapling".into(),
                         receiver_encoding: hex_string(&derived.sapling_receiver),
                         receiver_fingerprint: receiver_fingerprint(&derived.sapling_receiver),
@@ -329,6 +334,56 @@ mod tests {
         assert!(first
             .qr_text
             .starts_with(&format!("zcash:{}", first.address)));
+    }
+
+    #[test]
+    fn minted_addresses_register_ironwood_receiver_alongside_orchard() {
+        let temp = tempdir().unwrap();
+        let service = PaymentService::initialize(config(temp.path())).unwrap();
+        let session = service
+            .issue_payment_session(PaymentSessionRequest {
+                payment_source: "zcash".into(),
+                label: None,
+                memo: None,
+                message: None,
+                amount: None,
+            })
+            .unwrap();
+
+        let conn = rusqlite::Connection::open(temp.path().join("app.db")).unwrap();
+        let mut statement = conn
+            .prepare(
+                "SELECT pool FROM address_receivers
+                 JOIN issued_addresses USING (address_id)
+                 WHERE unified_address = ?1
+                 ORDER BY pool",
+            )
+            .unwrap();
+        let pools = statement
+            .query_map(rusqlite::params![session.address], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(pools, vec!["ironwood", "orchard", "sapling"]);
+
+        let fingerprints: Vec<(String, Vec<u8>)> = conn
+            .prepare(
+                "SELECT pool, receiver_fingerprint FROM address_receivers
+                 JOIN issued_addresses USING (address_id)
+                 WHERE unified_address = ?1 AND pool IN ('orchard', 'ironwood')
+                 ORDER BY pool",
+            )
+            .unwrap()
+            .query_map(rusqlite::params![session.address], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(fingerprints[0].1, fingerprints[1].1);
     }
 
     #[test]

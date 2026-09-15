@@ -12,7 +12,7 @@ The current implementation includes:
 
 - persistent service-owned SQLite storage
 - startup wallet-identity integrity checks around the configured UIVK
-- real UIVK-derived unified address allocation with Orchard and Sapling receivers
+- real UIVK-derived unified address allocation with Orchard, Ironwood, and Sapling receivers
 - compact-block and mempool scanning primitives built on `librustzcash`
 - a long-lived sync loop with overlap rescans for reorg safety
 - an outbound webhook delivery worker with HMAC signing and bounded retries

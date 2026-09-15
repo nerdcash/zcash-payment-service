@@ -21,9 +21,8 @@ use zcash_client_backend::{
         },
     },
     scanning::{scan_block, Nullifiers, ScanningKeys},
-    wallet::Note,
 };
-use zcash_keys::{address::Receiver, keys::UnifiedIncomingViewingKey};
+use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId};
 use zip32::Scope;
@@ -168,6 +167,7 @@ pub struct IncomingPayment {
     pub mined_height: u32,
     pub sapling_received_zat: u64,
     pub orchard_received_zat: u64,
+    pub ironwood_received_zat: u64,
     pub transaction_received_zat: u64,
 }
 
@@ -529,25 +529,43 @@ where
                         AppError::Wallet("sapling output index overflowed u16".into())
                     })?,
                     value_zat: output.note().value().inner(),
-                    receiver_fingerprint: receiver_fingerprint(note_receiver_bytes(
-                        &Note::Sapling(output.note().clone()),
-                    )),
+                    receiver_fingerprint: receiver_fingerprint(
+                        output.note().recipient().to_bytes().to_vec(),
+                    ),
                 });
             }
 
             for output in tx.orchard_outputs() {
+                let (note, pool) = output.note();
                 receipts.push(IncomingReceipt {
                     txid_hex: txid_hex.clone(),
                     mined_height,
                     is_mempool: false,
-                    pool: "orchard".into(),
+                    pool: shielded_pool_name(*pool).into(),
                     output_index: u16::try_from(output.index()).map_err(|_| {
                         AppError::Wallet("orchard output index overflowed u16".into())
                     })?,
-                    value_zat: output.note().value().inner(),
-                    receiver_fingerprint: receiver_fingerprint(note_receiver_bytes(
-                        &Note::Orchard(*output.note()),
-                    )),
+                    value_zat: note.value().inner(),
+                    receiver_fingerprint: receiver_fingerprint(
+                        note.recipient().to_raw_address_bytes().to_vec(),
+                    ),
+                });
+            }
+
+            for output in tx.ironwood_outputs() {
+                let (note, pool) = output.note();
+                receipts.push(IncomingReceipt {
+                    txid_hex: txid_hex.clone(),
+                    mined_height,
+                    is_mempool: false,
+                    pool: shielded_pool_name(*pool).into(),
+                    output_index: u16::try_from(output.index()).map_err(|_| {
+                        AppError::Wallet("ironwood output index overflowed u16".into())
+                    })?,
+                    value_zat: note.value().inner(),
+                    receiver_fingerprint: receiver_fingerprint(
+                        note.recipient().to_raw_address_bytes().to_vec(),
+                    ),
                 });
             }
         }
@@ -663,6 +681,29 @@ pub fn scan_incoming_mempool_receipts_from_raw_transactions(
                 }
             }
         }
+
+        if let (Some(bundle), Some(pivk)) = (transaction.ironwood_bundle(), orchard_pivk.as_ref()) {
+            for (index, action) in bundle.actions().iter().enumerate() {
+                let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
+                if let Some((note, _, _)) =
+                    zcash_note_encryption::try_note_decryption(&domain, pivk, action)
+                {
+                    receipts.push(IncomingReceipt {
+                        txid_hex: txid_hex.clone(),
+                        mined_height: 0,
+                        is_mempool: true,
+                        pool: "ironwood".into(),
+                        output_index: u16::try_from(index).map_err(|_| {
+                            AppError::Wallet("ironwood mempool output index overflowed u16".into())
+                        })?,
+                        value_zat: note.value().inner(),
+                        receiver_fingerprint: receiver_fingerprint(
+                            note.recipient().to_raw_address_bytes().to_vec(),
+                        ),
+                    });
+                }
+            }
+        }
     }
 
     receipts.sort_by(|left, right| {
@@ -739,12 +780,14 @@ fn aggregate_receipts_by_transaction(receipts: &[IncomingReceipt]) -> Vec<Incomi
                 mined_height: receipt.mined_height,
                 sapling_received_zat: 0,
                 orchard_received_zat: 0,
+                ironwood_received_zat: 0,
                 transaction_received_zat: 0,
             });
 
         match receipt.pool.as_str() {
             "sapling" => entry.sapling_received_zat += receipt.value_zat,
             "orchard" => entry.orchard_received_zat += receipt.value_zat,
+            "ironwood" => entry.ironwood_received_zat += receipt.value_zat,
             _ => {}
         }
         entry.transaction_received_zat += receipt.value_zat;
@@ -753,11 +796,10 @@ fn aggregate_receipts_by_transaction(receipts: &[IncomingReceipt]) -> Vec<Incomi
     grouped.into_values().collect()
 }
 
-fn note_receiver_bytes(note: &Note) -> Vec<u8> {
-    match note.receiver() {
-        Receiver::Orchard(address) => address.to_raw_address_bytes().to_vec(),
-        Receiver::Sapling(address) => address.to_bytes().to_vec(),
-        Receiver::Transparent(_) => Vec::new(),
+fn shielded_pool_name(pool: orchard::ValuePool) -> &'static str {
+    match pool {
+        orchard::ValuePool::Orchard => "orchard",
+        orchard::ValuePool::Ironwood => "ironwood",
     }
 }
 
@@ -777,16 +819,28 @@ mod tests {
         Arc,
     };
 
+    use tempfile::tempdir;
     use tonic::Status;
-    use zcash_client_backend::proto::service::{RawTransaction, TreeState};
+    use zcash_client_backend::proto::{
+        compact_formats::{ChainMetadata, CompactBlock, CompactOrchardAction, CompactTx},
+        service::{RawTransaction, TreeState},
+    };
+    use zcash_keys::keys::UnifiedIncomingViewingKey;
+    use zcash_note_encryption::Domain;
 
-    use crate::error::AppError;
+    use crate::{
+        config::Config,
+        db::{AppDb, NewAddressReceiver, NewIssuedAddress},
+        error::AppError,
+        receipt_ingest::persist_scanned_receipts,
+        zcash::WalletView,
+    };
 
     use super::{
-        missing_mempool_transaction_is_benign,
+        missing_mempool_transaction_is_benign, receiver_fingerprint,
         scan_incoming_mempool_receipts_from_raw_transactions, scan_incoming_payments_for_heights,
-        scan_incoming_receipts_for_range_with, tree_state_to_chain_state,
-        wait_for_block_mempool_stream_with,
+        scan_incoming_receipts_for_range_with, scan_incoming_receipts_from_compact_blocks,
+        tree_state_to_chain_state, wait_for_block_mempool_stream_with,
     };
 
     const TESTNET_LIGHTWALLETD_URL_ENV: &str = "ZCASH_TESTNET_LIGHTWALLETD_URL";
@@ -900,8 +954,176 @@ mod tests {
                 observation.transaction_received_zat,
                 *transaction_received_zat
             );
-            assert!(observation.sapling_received_zat > 0 || observation.orchard_received_zat > 0);
+            assert!(
+                observation.sapling_received_zat > 0
+                    || observation.orchard_received_zat > 0
+                    || observation.ironwood_received_zat > 0
+            );
         }
+    }
+
+    fn ironwood_compact_block_fixture(
+        encoded_uivk: &str,
+        value_zat: u64,
+    ) -> (CompactBlock, Vec<u8>, [u8; 32]) {
+        let network = super::consensus_network("mainnet").unwrap();
+        let uivk = UnifiedIncomingViewingKey::decode(&network, encoded_uivk).unwrap();
+        let orchard_ivk = uivk
+            .orchard()
+            .as_ref()
+            .expect("UIVK must contain an Orchard key");
+        let recipient = orchard_ivk.address_at(0u32);
+
+        let nf_old: orchard::note::Nullifier =
+            Option::from(orchard::note::Nullifier::from_bytes(&[1u8; 32]))
+                .expect("test nullifier is a valid Pallas base");
+        let rho: orchard::note::Rho =
+            Option::from(orchard::note::Rho::from_bytes(&nf_old.to_bytes()))
+                .expect("rho matches the revealed nullifier");
+        let rseed: orchard::note::RandomSeed = (0u8..=255)
+            .find_map(|byte| Option::from(orchard::note::RandomSeed::from_bytes([byte; 32], &rho)))
+            .expect("at least one test rseed is valid");
+        let note: orchard::Note = Option::from(orchard::Note::from_parts(
+            recipient,
+            orchard::value::NoteValue::from_raw(value_zat),
+            rho,
+            rseed,
+            orchard::note::NoteVersion::V3,
+        ))
+        .expect("test Ironwood note is valid");
+
+        let encryptor =
+            orchard::note_encryption::IronwoodNoteEncryption::new(None, note, [0u8; 512]);
+        let cmx = orchard::note::ExtractedNoteCommitment::from(note.commitment());
+        let ephemeral_key = orchard::note_encryption::IronwoodDomain::epk_bytes(encryptor.epk());
+        let enc_ciphertext = encryptor.encrypt_note_plaintext();
+
+        let action = CompactOrchardAction {
+            nullifier: nf_old.to_bytes().to_vec(),
+            cmx: cmx.to_bytes().to_vec(),
+            ephemeral_key: ephemeral_key.0.to_vec(),
+            ciphertext: enc_ciphertext[..52].to_vec(),
+        };
+
+        let txid = [0x11u8; 32];
+        let compact_tx = CompactTx {
+            index: 0,
+            txid: txid.to_vec(),
+            ironwood_actions: vec![action.clone()],
+            // A V3 ciphertext in the Orchard slot must not decrypt under OrchardDomain.
+            actions: vec![action],
+            ..Default::default()
+        };
+
+        let block = CompactBlock {
+            height: 1,
+            hash: vec![0x22; 32],
+            prev_hash: vec![0; 32],
+            vtx: vec![compact_tx],
+            chain_metadata: Some(ChainMetadata {
+                sapling_commitment_tree_size: 0,
+                orchard_commitment_tree_size: 1,
+                ironwood_commitment_tree_size: 1,
+            }),
+            ..Default::default()
+        };
+
+        (
+            block,
+            receiver_fingerprint(recipient.to_raw_address_bytes().to_vec()),
+            txid,
+        )
+    }
+
+    fn scanner_test_config(temp: &std::path::Path) -> Config {
+        Config {
+            listen_addr: "127.0.0.1:0".into(),
+            network: "mainnet".into(),
+            startup_uivk: Some(MAINNET_UIVK_NO_TRANSPARENT.into()),
+            lightwalletd_url: None,
+            birthday_height: Some(1),
+            wallet_db_path: temp.join("wallet.db"),
+            app_db_path: temp.join("app.db"),
+            log_dir: temp.join("logs"),
+            catch_up_threshold_blocks: 1,
+            catch_up_batch_size: 100,
+            sync_poll_interval_seconds: 5,
+            webhook_url: None,
+            webhook_secret: None,
+            webhook_poll_interval_seconds: 2,
+            webhook_retry_delay_seconds: 30,
+            webhook_retry_max_delay_seconds: 300,
+            webhook_max_attempts: 8,
+            webhook_report_confirmations: 0,
+            finality_confirmations: 100,
+        }
+    }
+
+    #[test]
+    fn compact_block_scan_decrypts_ironwood_output_and_attributes_it() {
+        const VALUE_ZAT: u64 = 123_456;
+        let (block, expected_fingerprint, txid) =
+            ironwood_compact_block_fixture(MAINNET_UIVK_NO_TRANSPARENT, VALUE_ZAT);
+
+        let receipts = scan_incoming_receipts_from_compact_blocks(
+            "mainnet",
+            MAINNET_UIVK_NO_TRANSPARENT,
+            [block],
+        )
+        .unwrap();
+
+        assert_eq!(
+            receipts.len(),
+            1,
+            "V3 ciphertext must decrypt only as Ironwood"
+        );
+        let receipt = &receipts[0];
+        assert_eq!(receipt.pool, "ironwood");
+        assert_eq!(receipt.value_zat, VALUE_ZAT);
+        assert_eq!(receipt.output_index, 0);
+        assert_eq!(receipt.mined_height, 1);
+        assert!(!receipt.is_mempool);
+        assert_eq!(receipt.receiver_fingerprint, expected_fingerprint);
+        assert_eq!(
+            receipt.txid_hex,
+            zcash_primitives::transaction::TxId::from_bytes(txid).to_string()
+        );
+
+        // OrchardDomain must reject the same V3 ciphertext, so no orchard receipt is produced.
+        assert!(receipts.iter().all(|item| item.pool == "ironwood"));
+
+        let temp = tempdir().unwrap();
+        let app_db = AppDb::open(temp.path().join("app.db")).unwrap();
+        app_db
+            .ensure_service_metadata(&scanner_test_config(temp.path()))
+            .unwrap();
+        let wallet = WalletView::decode("mainnet", MAINNET_UIVK_NO_TRANSPARENT).unwrap();
+        let derived = wallet.derive_address_after(None).unwrap();
+        let record = app_db
+            .insert_issued_address(NewIssuedAddress {
+                unified_address: &derived.encoded,
+                address_source: "fresh",
+                diversifier_index_be: Some(&derived.diversifier_index_be),
+                diversifier_bytes: None,
+                request_label: None,
+                request_memo: None,
+                request_message: None,
+                requested_amount: None,
+            })
+            .unwrap();
+        app_db
+            .insert_address_receivers(
+                record.address_id,
+                &[NewAddressReceiver {
+                    pool: "ironwood",
+                    receiver_encoding: "ironwood-test",
+                    receiver_fingerprint: &expected_fingerprint,
+                }],
+            )
+            .unwrap();
+
+        let affected = persist_scanned_receipts(&app_db, &receipts, 1, 0, 100).unwrap();
+        assert_eq!(affected, vec![record.address_id]);
     }
 
     #[test]
@@ -998,6 +1220,7 @@ mod tests {
             time: 0,
             sapling_tree: "zz".into(),
             orchard_tree: "zz".into(),
+            ironwood_tree: "zz".into(),
         })
         .unwrap_err();
 
