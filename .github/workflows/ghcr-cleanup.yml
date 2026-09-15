@@ -26,18 +26,17 @@ jobs:
     timeout-minutes: 15
     permissions:
       packages: write
-      actions: write
     steps:
       - name: Delete old GHCR versions
         uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
         with:
           owner: nerdcash
           package: zcash-payment-service
-          # Always keep the rolling branch tag. SHA tags are eligible for
-          # pruning; keep the 5 newest tagged images (usually `main` plus
-          # recent SHAs that share that digest, then 4 older SHA builds).
+          # Always keep `main`. That digest also carries the newest SHA tag,
+          # so keep-n-tagged counts only older SHA images: 4 yields five SHA
+          # tags total (current plus four older).
           exclude-tags: main
-          keep-n-tagged: 5
+          keep-n-tagged: 4
           delete-untagged: true
           delete-orphaned-images: true
           delete-partial-images: true
