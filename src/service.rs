@@ -389,15 +389,14 @@ mod tests {
     #[test]
     fn concurrent_fresh_address_requests_all_succeed_with_unique_addresses() {
         let temp = tempdir().unwrap();
-        let config = Arc::new(config(temp.path()));
+        let service = Arc::new(PaymentService::initialize(config(temp.path())).unwrap());
         let barrier = Arc::new(Barrier::new(8));
 
         let handles: Vec<_> = (0..8)
             .map(|_| {
-                let config = Arc::clone(&config);
+                let service = Arc::clone(&service);
                 let barrier = Arc::clone(&barrier);
                 thread::spawn(move || {
-                    let service = PaymentService::initialize((*config).clone()).unwrap();
                     barrier.wait();
                     service
                         .issue_payment_session(PaymentSessionRequest {
