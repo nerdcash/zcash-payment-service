@@ -981,9 +981,7 @@ mod tests {
             Option::from(orchard::note::Rho::from_bytes(&nf_old.to_bytes()))
                 .expect("rho matches the revealed nullifier");
         let rseed: orchard::note::RandomSeed = (0u8..=255)
-            .find_map(|byte| {
-                Option::from(orchard::note::RandomSeed::from_bytes([byte; 32], &rho))
-            })
+            .find_map(|byte| Option::from(orchard::note::RandomSeed::from_bytes([byte; 32], &rho)))
             .expect("at least one test rseed is valid");
         let note: orchard::Note = Option::from(orchard::Note::from_parts(
             recipient,
@@ -1074,7 +1072,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(receipts.len(), 1, "V3 ciphertext must decrypt only as Ironwood");
+        assert_eq!(
+            receipts.len(),
+            1,
+            "V3 ciphertext must decrypt only as Ironwood"
+        );
         let receipt = &receipts[0];
         assert_eq!(receipt.pool, "ironwood");
         assert_eq!(receipt.value_zat, VALUE_ZAT);
@@ -1120,8 +1122,7 @@ mod tests {
             )
             .unwrap();
 
-        let affected =
-            persist_scanned_receipts(&app_db, &receipts, 1, 0, 100).unwrap();
+        let affected = persist_scanned_receipts(&app_db, &receipts, 1, 0, 100).unwrap();
         assert_eq!(affected, vec![record.address_id]);
     }
 
