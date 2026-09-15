@@ -1,0 +1,43 @@
+name: GHCR cleanup
+
+on:
+  schedule:
+    # Daily so GHCR storage stays bounded and the action's manifest cache
+    # is not evicted (GitHub drops unused caches after 7 days).
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Log what would be deleted without deleting
+        type: boolean
+        default: false
+
+concurrency:
+  group: ghcr-cleanup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    name: Prune old images
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      packages: write
+    steps:
+      - name: Delete old GHCR versions
+        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
+        with:
+          owner: nerdcash
+          package: zcash-payment-service
+          # Always keep `main`. That digest also carries the newest SHA tag,
+          # so keep-n-tagged counts only older SHA images: 4 yields five SHA
+          # tags total (current plus four older).
+          exclude-tags: main
+          keep-n-tagged: 4
+          delete-untagged: true
+          delete-orphaned-images: true
+          delete-partial-images: true
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
