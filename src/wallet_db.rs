@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, MutexGuard, OnceLock},
 };
 
 use rand_core::OsRng;
@@ -28,15 +28,12 @@ pub struct WalletDbState {
 type SqliteWalletDb =
     WalletDb<rusqlite::Connection, zcash_protocol::consensus::Network, SystemClock, OsRng>;
 
-fn migrate_wallet_db(wallet_db: &mut SqliteWalletDb) -> Result<(), AppError> {
+fn wallet_db_init_lock() -> Result<MutexGuard<'static, ()>, AppError> {
     static WALLET_DB_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _guard = WALLET_DB_INIT_LOCK
+    WALLET_DB_INIT_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .map_err(|_| AppError::Wallet("wallet DB initialization lock was poisoned".into()))?;
-    init_wallet_db(wallet_db, None).map_err(|error| {
-        AppError::Wallet(format!("failed to initialize wallet DB schema: {error}"))
-    })
+        .map_err(|_| AppError::Wallet("wallet DB initialization lock was poisoned".into()))
 }
 
 fn migrated_wallet_db_paths() -> &'static Mutex<HashSet<PathBuf>> {
@@ -48,25 +45,25 @@ fn normalize_wallet_db_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn ensure_wallet_db_schema(path: &Path, wallet_db: &mut SqliteWalletDb) -> Result<(), AppError> {
-    let normalized_path = normalize_wallet_db_path(path);
-
-    {
-        let migrated_paths = migrated_wallet_db_paths()
-            .lock()
-            .map_err(|_| AppError::Wallet("wallet DB migration cache lock was poisoned".into()))?;
-        if migrated_paths.contains(&normalized_path) {
-            return Ok(());
-        }
-    }
-
-    migrate_wallet_db(wallet_db)?;
-
-    let mut migrated_paths = migrated_wallet_db_paths()
+fn path_already_migrated(normalized_path: &Path) -> Result<bool, AppError> {
+    Ok(migrated_wallet_db_paths()
         .lock()
-        .map_err(|_| AppError::Wallet("wallet DB migration cache lock was poisoned".into()))?;
-    migrated_paths.insert(normalized_path);
+        .map_err(|_| AppError::Wallet("wallet DB migration cache lock was poisoned".into()))?
+        .contains(normalized_path))
+}
+
+fn mark_path_migrated(normalized_path: PathBuf) -> Result<(), AppError> {
+    migrated_wallet_db_paths()
+        .lock()
+        .map_err(|_| AppError::Wallet("wallet DB migration cache lock was poisoned".into()))?
+        .insert(normalized_path);
     Ok(())
+}
+
+fn migrate_wallet_db(wallet_db: &mut SqliteWalletDb) -> Result<(), AppError> {
+    init_wallet_db(wallet_db, None).map_err(|error| {
+        AppError::Wallet(format!("failed to initialize wallet DB schema: {error}"))
+    })
 }
 
 fn open_wallet_db(path: &Path, network_name: &str) -> Result<SqliteWalletDb, AppError> {
@@ -78,15 +75,34 @@ fn open_wallet_db(path: &Path, network_name: &str) -> Result<SqliteWalletDb, App
     WalletDb::for_path(path, network, SystemClock, OsRng).map_err(AppError::Database)
 }
 
+fn open_migrated_wallet_db(path: &Path, network_name: &str) -> Result<SqliteWalletDb, AppError> {
+    let normalized_path = normalize_wallet_db_path(path);
+    if path_already_migrated(&normalized_path)? {
+        return open_wallet_db(path, network_name);
+    }
+
+    // Lock before opening. Opening first, then waiting on the init mutex, leaves
+    // extra SQLite connections live while init_wallet_db needs an exclusive lock
+    // (a lock inversion Ironwood schema migrations hit reliably).
+    let _guard = wallet_db_init_lock()?;
+
+    let normalized_path = normalize_wallet_db_path(path);
+    if path_already_migrated(&normalized_path)? {
+        return open_wallet_db(path, network_name);
+    }
+
+    let mut wallet_db = open_wallet_db(path, network_name)?;
+    migrate_wallet_db(&mut wallet_db)?;
+    mark_path_migrated(normalize_wallet_db_path(path))?;
+    Ok(wallet_db)
+}
+
 pub fn initialize_wallet_db(config: &Config) -> Result<(), AppError> {
-    let mut wallet_db = open_wallet_db(&config.wallet_db_path, &config.network)?;
-    ensure_wallet_db_schema(&config.wallet_db_path, &mut wallet_db)?;
-    Ok(())
+    open_migrated_wallet_db(&config.wallet_db_path, &config.network).map(|_| ())
 }
 
 pub fn wallet_db_state(config: &Config) -> Result<WalletDbState, AppError> {
-    let mut wallet_db = open_wallet_db(&config.wallet_db_path, &config.network)?;
-    ensure_wallet_db_schema(&config.wallet_db_path, &mut wallet_db)?;
+    let wallet_db = open_migrated_wallet_db(&config.wallet_db_path, &config.network)?;
 
     let birthday_height = wallet_db
         .get_wallet_birthday()
@@ -133,5 +149,65 @@ pub fn read_wallet_db_identity(path: &Path) -> Result<Option<WalletDbIdentity>, 
         }
         Err(SqliteError::QueryReturnedNoRows) => Ok(None),
         Err(error) => Err(AppError::Database(error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::Path,
+        sync::{Arc, Barrier},
+        thread,
+    };
+
+    use tempfile::tempdir;
+
+    use super::initialize_wallet_db;
+    use crate::config::Config;
+
+    fn config(temp: &Path) -> Config {
+        Config {
+            listen_addr: "127.0.0.1:0".into(),
+            network: "mainnet".into(),
+            startup_uivk: None,
+            lightwalletd_url: None,
+            birthday_height: Some(123),
+            wallet_db_path: temp.join("wallet.db"),
+            app_db_path: temp.join("app.db"),
+            log_dir: temp.join("logs"),
+            catch_up_threshold_blocks: 1,
+            catch_up_batch_size: 100,
+            sync_poll_interval_seconds: 5,
+            webhook_url: None,
+            webhook_secret: None,
+            webhook_poll_interval_seconds: 2,
+            webhook_retry_delay_seconds: 30,
+            webhook_retry_max_delay_seconds: 300,
+            webhook_max_attempts: 8,
+            webhook_report_confirmations: 1,
+            finality_confirmations: 100,
+        }
+    }
+
+    #[test]
+    fn concurrent_initialize_of_the_same_wallet_db_completes() {
+        let temp = tempdir().unwrap();
+        let config = Arc::new(config(temp.path()));
+        let barrier = Arc::new(Barrier::new(8));
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let config = Arc::clone(&config);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    initialize_wallet_db(&config)
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
     }
 }
