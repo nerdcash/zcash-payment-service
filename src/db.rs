@@ -1437,7 +1437,7 @@ impl AppDb {
     }
 
     fn initialize_schema(&self) -> Result<(), AppError> {
-        let conn = self.connect()?;
+        let mut conn = self.connect()?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS wallet_identity (
@@ -1600,7 +1600,7 @@ impl AppDb {
         )?;
 
         ensure_address_receipts_recent_mempool_columns(&conn)?;
-        ensure_ironwood_pool_support(&conn)?;
+        ensure_ironwood_pool_support(&mut conn)?;
 
         Ok(())
     }
@@ -1766,14 +1766,18 @@ fn copy_orchard_receivers_to_ironwood(conn: &Connection) -> Result<(), AppError>
     Ok(())
 }
 
-fn ensure_ironwood_pool_support(conn: &Connection) -> Result<(), AppError> {
+fn ensure_ironwood_pool_support(conn: &mut Connection) -> Result<(), AppError> {
+    // SQLite ignores PRAGMA foreign_keys inside a transaction, so toggle it
+    // around the rebuild rather than as part of it.
     conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let result = (|| {
+        let tx = conn.transaction()?;
 
-    if !table_allows_ironwood_pool(conn, "address_receivers")? {
-        rebuild_pool_table(
-            conn,
-            "address_receivers",
-            "
+        if !table_allows_ironwood_pool(&tx, "address_receivers")? {
+            rebuild_pool_table(
+                &tx,
+                "address_receivers",
+                "
             CREATE TABLE address_receivers (
                 receiver_id INTEGER PRIMARY KEY,
                 address_id INTEGER NOT NULL REFERENCES issued_addresses(address_id) ON DELETE CASCADE,
@@ -1787,20 +1791,20 @@ fn ensure_ironwood_pool_support(conn: &Connection) -> Result<(), AppError> {
                 UNIQUE(pool, receiver_fingerprint)
             );
             ",
-            "INSERT INTO address_receivers (
+                "INSERT INTO address_receivers (
                 receiver_id, address_id, pool, receiver_encoding, receiver_fingerprint, is_active, created_at
             )
             SELECT receiver_id, address_id, pool, receiver_encoding, receiver_fingerprint, is_active, created_at
             FROM address_receivers_ironwood_upgrade",
-            &[],
-        )?;
-    }
+                &[],
+            )?;
+        }
 
-    if !table_allows_ironwood_pool(conn, "address_receipts_recent")? {
-        rebuild_pool_table(
-            conn,
-            "address_receipts_recent",
-            "
+        if !table_allows_ironwood_pool(&tx, "address_receipts_recent")? {
+            rebuild_pool_table(
+                &tx,
+                "address_receipts_recent",
+                "
             CREATE TABLE address_receipts_recent (
                 receipt_id INTEGER PRIMARY KEY,
                 address_id INTEGER NOT NULL REFERENCES issued_addresses(address_id) ON DELETE CASCADE,
@@ -1818,7 +1822,7 @@ fn ensure_ironwood_pool_support(conn: &Connection) -> Result<(), AppError> {
                 state_version INTEGER NOT NULL
             );
             ",
-            "INSERT INTO address_receipts_recent (
+                "INSERT INTO address_receipts_recent (
                 receipt_id, address_id, txid, pool, receipt_uid, value_zat, mined_height,
                 confirmation_depth, eligible_for_webhook, receipt_kind, first_observed_at,
                 observed_at, receipt_state, state_version
@@ -1827,21 +1831,24 @@ fn ensure_ironwood_pool_support(conn: &Connection) -> Result<(), AppError> {
                 confirmation_depth, eligible_for_webhook, receipt_kind, first_observed_at,
                 observed_at, receipt_state, state_version
             FROM address_receipts_recent_ironwood_upgrade",
-            &[
-                "CREATE INDEX IF NOT EXISTS address_receipts_recent_address_height_idx ON address_receipts_recent (address_id, mined_height)",
-                "CREATE INDEX IF NOT EXISTS address_receipts_recent_address_eligibility_idx ON address_receipts_recent (address_id, eligible_for_webhook, receipt_state)",
-                "CREATE INDEX IF NOT EXISTS address_receipts_recent_mempool_txid_idx ON address_receipts_recent (receipt_kind, receipt_state, txid)",
-            ],
-        )?;
-    }
+                &[
+                    "CREATE INDEX IF NOT EXISTS address_receipts_recent_address_height_idx ON address_receipts_recent (address_id, mined_height)",
+                    "CREATE INDEX IF NOT EXISTS address_receipts_recent_address_eligibility_idx ON address_receipts_recent (address_id, eligible_for_webhook, receipt_state)",
+                    "CREATE INDEX IF NOT EXISTS address_receipts_recent_mempool_txid_idx ON address_receipts_recent (receipt_kind, receipt_state, txid)",
+                ],
+            )?;
+        }
 
-    copy_orchard_receivers_to_ironwood(conn)?;
-    conn.execute(
-        "UPDATE service_metadata SET app_schema_version = ?1 WHERE singleton_id = 1 AND app_schema_version < ?1",
-        params![APP_SCHEMA_VERSION],
-    )?;
+        copy_orchard_receivers_to_ironwood(&tx)?;
+        tx.execute(
+            "UPDATE service_metadata SET app_schema_version = ?1 WHERE singleton_id = 1 AND app_schema_version < ?1",
+            params![APP_SCHEMA_VERSION],
+        )?;
+        tx.commit()?;
+        Ok(())
+    })();
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    Ok(())
+    result
 }
 
 fn ensure_address_receipts_recent_mempool_columns(conn: &Connection) -> Result<(), AppError> {
