@@ -96,6 +96,7 @@ async fn sync_once(config: &Config) -> Result<SyncWakeStrategy, AppError> {
         tracing::info!(
             sapling_key_count = scanning_keys.sapling().len(),
             orchard_key_count = scanning_keys.orchard().len(),
+            ironwood_key_count = scanning_keys.ironwood().len(),
             "constructed scanning keys from startup UIVK"
         );
         if let Some(lightwalletd_url) = config.lightwalletd_url.as_deref() {

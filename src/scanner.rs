@@ -21,9 +21,8 @@ use zcash_client_backend::{
         },
     },
     scanning::{scan_block, Nullifiers, ScanningKeys},
-    wallet::Note,
 };
-use zcash_keys::{address::Receiver, keys::UnifiedIncomingViewingKey};
+use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId};
 use zip32::Scope;
@@ -168,6 +167,7 @@ pub struct IncomingPayment {
     pub mined_height: u32,
     pub sapling_received_zat: u64,
     pub orchard_received_zat: u64,
+    pub ironwood_received_zat: u64,
     pub transaction_received_zat: u64,
 }
 
@@ -529,25 +529,43 @@ where
                         AppError::Wallet("sapling output index overflowed u16".into())
                     })?,
                     value_zat: output.note().value().inner(),
-                    receiver_fingerprint: receiver_fingerprint(note_receiver_bytes(
-                        &Note::Sapling(output.note().clone()),
-                    )),
+                    receiver_fingerprint: receiver_fingerprint(
+                        output.note().recipient().to_bytes().to_vec(),
+                    ),
                 });
             }
 
             for output in tx.orchard_outputs() {
+                let (note, pool) = output.note();
                 receipts.push(IncomingReceipt {
                     txid_hex: txid_hex.clone(),
                     mined_height,
                     is_mempool: false,
-                    pool: "orchard".into(),
+                    pool: shielded_pool_name(*pool).into(),
                     output_index: u16::try_from(output.index()).map_err(|_| {
                         AppError::Wallet("orchard output index overflowed u16".into())
                     })?,
-                    value_zat: output.note().value().inner(),
-                    receiver_fingerprint: receiver_fingerprint(note_receiver_bytes(
-                        &Note::Orchard(*output.note()),
-                    )),
+                    value_zat: note.value().inner(),
+                    receiver_fingerprint: receiver_fingerprint(
+                        note.recipient().to_raw_address_bytes().to_vec(),
+                    ),
+                });
+            }
+
+            for output in tx.ironwood_outputs() {
+                let (note, pool) = output.note();
+                receipts.push(IncomingReceipt {
+                    txid_hex: txid_hex.clone(),
+                    mined_height,
+                    is_mempool: false,
+                    pool: shielded_pool_name(*pool).into(),
+                    output_index: u16::try_from(output.index()).map_err(|_| {
+                        AppError::Wallet("ironwood output index overflowed u16".into())
+                    })?,
+                    value_zat: note.value().inner(),
+                    receiver_fingerprint: receiver_fingerprint(
+                        note.recipient().to_raw_address_bytes().to_vec(),
+                    ),
                 });
             }
         }
@@ -663,6 +681,29 @@ pub fn scan_incoming_mempool_receipts_from_raw_transactions(
                 }
             }
         }
+
+        if let (Some(bundle), Some(pivk)) = (transaction.ironwood_bundle(), orchard_pivk.as_ref()) {
+            for (index, action) in bundle.actions().iter().enumerate() {
+                let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
+                if let Some((note, _, _)) =
+                    zcash_note_encryption::try_note_decryption(&domain, pivk, action)
+                {
+                    receipts.push(IncomingReceipt {
+                        txid_hex: txid_hex.clone(),
+                        mined_height: 0,
+                        is_mempool: true,
+                        pool: "ironwood".into(),
+                        output_index: u16::try_from(index).map_err(|_| {
+                            AppError::Wallet("ironwood mempool output index overflowed u16".into())
+                        })?,
+                        value_zat: note.value().inner(),
+                        receiver_fingerprint: receiver_fingerprint(
+                            note.recipient().to_raw_address_bytes().to_vec(),
+                        ),
+                    });
+                }
+            }
+        }
     }
 
     receipts.sort_by(|left, right| {
@@ -739,12 +780,14 @@ fn aggregate_receipts_by_transaction(receipts: &[IncomingReceipt]) -> Vec<Incomi
                 mined_height: receipt.mined_height,
                 sapling_received_zat: 0,
                 orchard_received_zat: 0,
+                ironwood_received_zat: 0,
                 transaction_received_zat: 0,
             });
 
         match receipt.pool.as_str() {
             "sapling" => entry.sapling_received_zat += receipt.value_zat,
             "orchard" => entry.orchard_received_zat += receipt.value_zat,
+            "ironwood" => entry.ironwood_received_zat += receipt.value_zat,
             _ => {}
         }
         entry.transaction_received_zat += receipt.value_zat;
@@ -753,11 +796,10 @@ fn aggregate_receipts_by_transaction(receipts: &[IncomingReceipt]) -> Vec<Incomi
     grouped.into_values().collect()
 }
 
-fn note_receiver_bytes(note: &Note) -> Vec<u8> {
-    match note.receiver() {
-        Receiver::Orchard(address) => address.to_raw_address_bytes().to_vec(),
-        Receiver::Sapling(address) => address.to_bytes().to_vec(),
-        Receiver::Transparent(_) => Vec::new(),
+fn shielded_pool_name(pool: orchard::ValuePool) -> &'static str {
+    match pool {
+        orchard::ValuePool::Orchard => "orchard",
+        orchard::ValuePool::Ironwood => "ironwood",
     }
 }
 
@@ -900,7 +942,11 @@ mod tests {
                 observation.transaction_received_zat,
                 *transaction_received_zat
             );
-            assert!(observation.sapling_received_zat > 0 || observation.orchard_received_zat > 0);
+            assert!(
+                observation.sapling_received_zat > 0
+                    || observation.orchard_received_zat > 0
+                    || observation.ironwood_received_zat > 0
+            );
         }
     }
 
@@ -998,6 +1044,7 @@ mod tests {
             time: 0,
             sapling_tree: "zz".into(),
             orchard_tree: "zz".into(),
+            ironwood_tree: "zz".into(),
         })
         .unwrap_err();
 

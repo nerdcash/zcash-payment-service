@@ -209,6 +209,36 @@ pub fn scanning_keys_from_uivk(
         }
     }
 
+    struct IronwoodScanKey {
+        ivk: orchard::keys::IncomingViewingKey,
+        account_id: CanonicalScanAccountId,
+    }
+
+    impl
+        ScanningKeyOps<
+            orchard::note_encryption::IronwoodDomain,
+            CanonicalScanAccountId,
+            orchard::note::Nullifier,
+        > for IronwoodScanKey
+    {
+        fn prepare(&self) -> orchard::keys::PreparedIncomingViewingKey {
+            self.ivk.prepare()
+        }
+        fn nf(
+            &self,
+            _note: &orchard::Note,
+            _note_position: Position,
+        ) -> Option<orchard::note::Nullifier> {
+            None
+        }
+        fn account_id(&self) -> &CanonicalScanAccountId {
+            &self.account_id
+        }
+        fn key_scope(&self) -> Option<Scope> {
+            Some(Scope::External)
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     let mut sapling_keys: std::collections::HashMap<
         (CanonicalScanAccountId, Scope),
@@ -225,6 +255,19 @@ pub fn scanning_keys_from_uivk(
         Box<
             dyn ScanningKeyOps<
                     orchard::note_encryption::OrchardDomain,
+                    CanonicalScanAccountId,
+                    orchard::note::Nullifier,
+                > + Send
+                + Sync,
+        >,
+    > = std::collections::HashMap::new();
+
+    #[allow(clippy::type_complexity)]
+    let mut ironwood_keys: std::collections::HashMap<
+        (CanonicalScanAccountId, Scope),
+        Box<
+            dyn ScanningKeyOps<
+                    orchard::note_encryption::IronwoodDomain,
                     CanonicalScanAccountId,
                     orchard::note::Nullifier,
                 > + Send
@@ -250,9 +293,18 @@ pub fn scanning_keys_from_uivk(
                 account_id: CANONICAL_SCAN_ACCOUNT_ID,
             }),
         );
+        // Ironwood reuses Orchard viewing keys and receivers, but is a distinct
+        // pool decrypted under IronwoodDomain (V3 note plaintexts).
+        ironwood_keys.insert(
+            (CANONICAL_SCAN_ACCOUNT_ID, Scope::External),
+            Box::new(IronwoodScanKey {
+                ivk: orchard_ivk.clone(),
+                account_id: CANONICAL_SCAN_ACCOUNT_ID,
+            }),
+        );
     }
 
-    Ok(ScanningKeys::new(sapling_keys, orchard_keys))
+    Ok(ScanningKeys::new(sapling_keys, orchard_keys, ironwood_keys))
 }
 
 fn diversifier_from_bytes(bytes: Option<&[u8]>) -> Result<DiversifierIndex, AppError> {
@@ -290,6 +342,7 @@ mod tests {
             super::scanning_keys_from_uivk("mainnet", MAINNET_UIVK_NO_TRANSPARENT).unwrap();
         assert_eq!(scanning_keys.sapling().len(), 1);
         assert_eq!(scanning_keys.orchard().len(), 1);
+        assert_eq!(scanning_keys.ironwood().len(), 1);
     }
 
     #[test]
@@ -342,6 +395,7 @@ mod tests {
         assert_eq!(wallet.encoded_uivk(), encoded_uivk);
         assert_eq!(scanning_keys.sapling().len(), 1);
         assert_eq!(scanning_keys.orchard().len(), 1);
+        assert_eq!(scanning_keys.ironwood().len(), 1);
     }
 
     /// Verify that the sapling IVK bytes from UIVK match those from UFVK so scanning is equivalent.

@@ -53,6 +53,10 @@ needs address allocation, payment observation, and webhook-style reconciliation.
 - Each issued payment destination is a unified address.
 - Phase 1 requires an Orchard receiver and a Sapling receiver, with no
   transparent receiver.
+- After NU6.3 (Ironwood), the Orchard pool is restricted. New shielded
+  payments arrive in the Ironwood pool, which reuses the existing Orchard
+  receiver encoding. The service therefore persists an Ironwood receiver
+  fingerprint for each issued address so Ironwood receipts can be attributed.
 - The current implementation derives a fresh unified address directly from the
   canonical UIVK for every payment session.
 
