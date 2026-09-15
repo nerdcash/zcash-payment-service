@@ -115,7 +115,8 @@ The combined CI workflow pushes these images after the checks pass on `main`:
 - `ghcr.io/nerdcash/zcash-payment-service:main`
 
 Those images are intended to be public. A normal pull does not require
-registry credentials:
+registry credentials. Only the `main` tag and the five most recent
+SHA-tagged images are retained; older versions are pruned daily.
 
 ```powershell
 docker pull ghcr.io/nerdcash/zcash-payment-service:main
