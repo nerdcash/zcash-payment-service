@@ -80,8 +80,11 @@ Two thresholds are intentionally distinct:
 
 The reporting threshold is a named code constant in phase 1. A future phase may
 make it configurable. The value `0` enables provisional mempool receipt
-reporting, including eviction reconciliation and 24-hour aging until a receipt
-is confirmed in a mined block.
+reporting, including 24-hour aging until a receipt is confirmed in a mined
+block. A mempool receipt that disappears is kept until the next block is
+scanned, so a transaction mined out of the mempool does not report a zero total
+before that block is applied. It is revoked only when the scanned tip does not
+contain it.
 
 ### Reorg handling
 
@@ -116,7 +119,7 @@ Implemented in this slice:
 - webhook queue population for dirty addresses during catch-up batches
 - receipt-maturity advancement as the chain tip moves
 - durable webhook worker that signs and sends queued observations with exponential backoff and a max-attempt ceiling
-- provisional mempool receipt tracking with eviction reconciliation and 24-hour aging when the reporting threshold is zero
+- provisional mempool receipt tracking with deferred eviction reconciliation and 24-hour aging when the reporting threshold is zero
 - design baseline and operational documentation
 
 Not yet implemented in this slice:

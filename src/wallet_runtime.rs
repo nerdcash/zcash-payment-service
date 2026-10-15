@@ -171,9 +171,16 @@ async fn sync_with_lightwalletd(
             )
             .await
         },
-        |tip_height| async move {
-            reconcile_current_mempool(config, app_db, startup_uivk, lightwalletd_url, tip_height)
-                .await
+        |tip_height, revoke_missing| async move {
+            reconcile_current_mempool(
+                config,
+                app_db,
+                startup_uivk,
+                lightwalletd_url,
+                tip_height,
+                revoke_missing,
+            )
+            .await
         },
     )
     .await
@@ -207,7 +214,7 @@ where
     ReconcileOverlapBatchFuture: Future<Output = Result<ReceiptRangeReconciliation, AppError>>,
     ScanBatchesWithPipelineFn: FnOnce(u32, ScanBatch, u32, u32) -> ScanBatchesWithPipelineFuture,
     ScanBatchesWithPipelineFuture: Future<Output = Result<(Vec<i64>, i64), AppError>>,
-    ReconcileCurrentMempoolFn: FnOnce(u32) -> ReconcileCurrentMempoolFuture,
+    ReconcileCurrentMempoolFn: FnOnce(u32, bool) -> ReconcileCurrentMempoolFuture,
     ReconcileCurrentMempoolFuture: Future<Output = Result<Vec<i64>, AppError>>,
 {
     let tip_height = latest_block_height_fn(lightwalletd_url.to_string()).await?;
@@ -351,7 +358,12 @@ where
     affected_address_ids.extend(matured_address_ids);
 
     if config.webhook_report_confirmations == 0 {
-        let mempool_affected_address_ids = reconcile_current_mempool_fn(tip_height).await?;
+        // Revoke a mempool receipt that disappeared only after this iteration
+        // has scanned the tip it sampled. Otherwise the transaction may be in
+        // a block that has not been read yet, and revoking it reports a zero total.
+        let revoke_missing = new_last_scanned_height >= i64::from(tip_height);
+        let mempool_affected_address_ids =
+            reconcile_current_mempool_fn(tip_height, revoke_missing).await?;
         affected_address_ids.extend(mempool_affected_address_ids);
     }
 
@@ -432,12 +444,15 @@ async fn wait_for_next_sync_trigger(
                 config.sync_poll_interval_seconds,
                 || wait_for_block_mempool_stream(&lightwalletd_url, expected_tip_height),
                 || async {
+                    // The next block may already contain this transaction.
+                    // Keep the provisional receipt until that block is scanned.
                     reconcile_current_mempool(
                         config,
                         &app_db,
                         startup_uivk,
                         &lightwalletd_url,
                         expected_tip_height,
+                        false,
                     )
                     .await?;
                     Ok(())
@@ -545,8 +560,44 @@ async fn reconcile_current_mempool(
     startup_uivk: &str,
     lightwalletd_url: &str,
     tip_height: u32,
+    revoke_missing: bool,
 ) -> Result<Vec<i64>, AppError> {
-    let mempool_txids = fetch_current_mempool_txids(lightwalletd_url).await?;
+    reconcile_current_mempool_with(
+        config,
+        app_db,
+        startup_uivk,
+        lightwalletd_url,
+        tip_height,
+        revoke_missing,
+        |lightwalletd_url| async move { fetch_current_mempool_txids(&lightwalletd_url).await },
+        |lightwalletd_url| async move { latest_block_height(&lightwalletd_url).await },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_current_mempool_with<
+    FetchCurrentMempoolTxids,
+    FetchCurrentMempoolTxidsFuture,
+    ConfirmTipHeight,
+    ConfirmTipHeightFuture,
+>(
+    config: &Config,
+    app_db: &AppDb,
+    startup_uivk: &str,
+    lightwalletd_url: &str,
+    tip_height: u32,
+    mut revoke_missing: bool,
+    fetch_current_mempool_txids_fn: FetchCurrentMempoolTxids,
+    latest_block_height_fn: ConfirmTipHeight,
+) -> Result<Vec<i64>, AppError>
+where
+    FetchCurrentMempoolTxids: FnOnce(String) -> FetchCurrentMempoolTxidsFuture,
+    FetchCurrentMempoolTxidsFuture: Future<Output = Result<Vec<Vec<u8>>, AppError>>,
+    ConfirmTipHeight: FnOnce(String) -> ConfirmTipHeightFuture,
+    ConfirmTipHeightFuture: Future<Output = Result<u32, AppError>>,
+{
+    let mempool_txids = fetch_current_mempool_txids_fn(lightwalletd_url.to_string()).await?;
     let current_mempool_txids = mempool_txids
         .iter()
         .map(|raw| wire_txid_to_display_hex(raw))
@@ -573,6 +624,42 @@ async fn reconcile_current_mempool(
         config.webhook_report_confirmations,
         &observed_at,
     )?;
+    // The scanned height already reached the sampled tip. Re-check only after the
+    // snapshot is in hand: a block mined in between can remove the tx without the
+    // scan having seen it yet.
+    if revoke_missing {
+        revoke_missing = match latest_block_height_fn(lightwalletd_url.to_string()).await {
+            Ok(latest_tip_height) if latest_tip_height <= tip_height => true,
+            Ok(latest_tip_height) => {
+                tracing::warn!(
+                    sampled_tip_height = tip_height,
+                    latest_tip_height,
+                    "deferring mempool revocation because the chain tip advanced after the mempool snapshot was collected"
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    scanned_tip_height = tip_height,
+                    "deferring mempool revocation because the chain tip could not be confirmed"
+                );
+                false
+            }
+        };
+    }
+    if !revoke_missing {
+        let kept_absent = known_active_txids
+            .difference(&current_mempool_txids)
+            .count();
+        if kept_absent > 0 {
+            tracing::debug!(
+                kept_absent,
+                tip_height,
+                "keeping provisional mempool receipts that left the mempool until the next block scan"
+            );
+        }
+    }
     let reconciliation = app_db.reconcile_mempool_snapshot(
         &current_mempool_txids,
         &attributed,
@@ -580,6 +667,7 @@ async fn reconcile_current_mempool(
         i64::from(tip_height),
         config.finality_confirmations,
         config.webhook_report_confirmations,
+        revoke_missing,
     )?;
     let queued = app_db
         .queue_webhook_deliveries_for_dirty_addresses(&reconciliation.affected_address_ids)?;
@@ -923,7 +1011,7 @@ mod tests {
         fs,
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc,
+            Arc, Mutex,
         },
     };
 
@@ -932,8 +1020,9 @@ mod tests {
 
     use super::{
         build_sync_scan_decision, forward_scan_start_height, next_scan_batch, plan_scan_range,
-        reorg_overlap_batch, run_single_sync_loop_iteration_with, sync_once,
-        sync_with_lightwalletd_with, wait_for_next_sync_trigger_with, ScanBatch, SyncWakeStrategy,
+        reconcile_current_mempool_with, reorg_overlap_batch, run_single_sync_loop_iteration_with,
+        sync_once, sync_with_lightwalletd_with, wait_for_next_sync_trigger_with, ScanBatch,
+        SyncWakeStrategy,
     };
     use crate::{
         config::Config,
@@ -1155,7 +1244,9 @@ mod tests {
                     Ok((reconciliation.affected_address_ids, 102))
                 }
             },
-            |_tip_height| async { unreachable!("mempool reconciliation should be disabled") },
+            |_tip_height, _revoke_missing| async {
+                unreachable!("mempool reconciliation should be disabled")
+            },
         )
         .await
         .unwrap();
@@ -1247,7 +1338,9 @@ mod tests {
             |_tip_height, first_batch, final_height, batch_size| async move {
                 panic!("unexpected forward scan during rewind: {first_batch:?} {final_height} {batch_size}")
             },
-            |_tip_height| async { unreachable!("mempool reconciliation should be disabled") },
+            |_tip_height, _revoke_missing| async {
+                unreachable!("mempool reconciliation should be disabled")
+            },
         )
         .await
         .unwrap();
@@ -1359,7 +1452,9 @@ mod tests {
                     Ok((affected, 111))
                 }
             },
-            |_tip_height| async { unreachable!("mempool reconciliation should be disabled") },
+            |_tip_height, _revoke_missing| async {
+                unreachable!("mempool reconciliation should be disabled")
+            },
         )
         .await
         .unwrap();
@@ -1395,7 +1490,9 @@ mod tests {
             |_tip_height, first_batch, final_height, batch_size| async move {
                 panic!("unexpected forward scan during second rewind: {first_batch:?} {final_height} {batch_size}")
             },
-            |_tip_height| async { unreachable!("mempool reconciliation should be disabled") },
+            |_tip_height, _revoke_missing| async {
+                unreachable!("mempool reconciliation should be disabled")
+            },
         )
         .await
         .unwrap();
@@ -1510,7 +1607,9 @@ mod tests {
                     Ok((affected, 112))
                 }
             },
-            |_tip_height| async { unreachable!("mempool reconciliation should be disabled") },
+            |_tip_height, _revoke_missing| async {
+                unreachable!("mempool reconciliation should be disabled")
+            },
         )
         .await
         .unwrap();
@@ -1741,6 +1840,175 @@ mod tests {
 
         assert_eq!(waited_for_block.load(Ordering::SeqCst), 0);
         assert_eq!(waited_with_reconcile.load(Ordering::SeqCst), 1);
+    }
+
+    const SAMPLED_TIP_HEIGHT: u32 = 1_000;
+
+    #[derive(Clone, Copy)]
+    enum TipConfirmation {
+        Height(u32),
+        Unavailable,
+        NotConsulted,
+    }
+
+    async fn exercise_mempool_revocation_window(
+        label: &str,
+        confirmation: TipConfirmation,
+    ) -> (Vec<&'static str>, Vec<(String, String)>, Vec<i64>) {
+        let temp = tempdir().unwrap();
+        let mut config = config(temp.path());
+        config.webhook_report_confirmations = 0;
+        let app_db = AppDb::open(&config.app_db_path).unwrap();
+        let address_id = insert_test_address(
+            &app_db,
+            &format!("uaddr1-{label}"),
+            &format!("sapling-{label}"),
+        );
+        let observed_at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let txid = format!("tx-{label}");
+        let receipt_uid = format!("{txid}:sapling:0");
+        app_db
+            .reconcile_mempool_snapshot(
+                &std::collections::BTreeSet::from([txid.clone()]),
+                &[AttributedScannedReceipt {
+                    address_id,
+                    txid_hex: txid,
+                    pool: "sapling".into(),
+                    receipt_uid,
+                    value_zat: 42,
+                    mined_height: 0,
+                    confirmation_depth: 0,
+                    eligible_for_webhook: true,
+                    receipt_kind: ReceiptKind::Mempool,
+                    first_observed_at: observed_at.clone(),
+                    last_observed_at: observed_at.clone(),
+                }],
+                &observed_at,
+                i64::from(SAMPLED_TIP_HEIGHT),
+                config.finality_confirmations,
+                config.webhook_report_confirmations,
+                true,
+            )
+            .unwrap();
+        let queued = app_db
+            .queue_webhook_deliveries_for_dirty_addresses(&[address_id])
+            .unwrap();
+        assert_eq!(queued, vec![address_id]);
+        let delivery_id = {
+            let conn = rusqlite::Connection::open(&config.app_db_path).unwrap();
+            conn.query_row(
+                "SELECT delivery_id FROM webhook_deliveries WHERE address_id = ?1",
+                rusqlite::params![address_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        // Deliver the positive total first. A later revocation is then a new
+        // zero-total webhook, which is the false report this window must not send.
+        app_db
+            .record_webhook_delivery_success(delivery_id, &observed_at, 200, "ok", 1)
+            .unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let startup_uivk = config.startup_uivk.as_deref().unwrap();
+        let revoke_missing = !matches!(confirmation, TipConfirmation::NotConsulted);
+        let events_for_snapshot = Arc::clone(&events);
+        let fetch_snapshot = move |_lightwalletd_url: String| {
+            let events_for_snapshot = Arc::clone(&events_for_snapshot);
+            async move {
+                events_for_snapshot.lock().unwrap().push("snapshot");
+                Ok(Vec::<Vec<u8>>::new())
+            }
+        };
+        let events_for_tip = Arc::clone(&events);
+        let confirm_tip = move |_lightwalletd_url: String| {
+            let events_for_tip = Arc::clone(&events_for_tip);
+            async move {
+                events_for_tip.lock().unwrap().push("tip");
+                match confirmation {
+                    TipConfirmation::Height(height) => Ok(height),
+                    TipConfirmation::Unavailable => {
+                        Err(AppError::Wallet("tip check failed".into()))
+                    }
+                    TipConfirmation::NotConsulted => Err(AppError::Wallet(
+                        "tip confirmation must not run when revocation is disabled".into(),
+                    )),
+                }
+            }
+        };
+
+        reconcile_current_mempool_with(
+            &config,
+            &app_db,
+            startup_uivk,
+            "https://example.invalid",
+            SAMPLED_TIP_HEIGHT,
+            revoke_missing,
+            fetch_snapshot,
+            confirm_tip,
+        )
+        .await
+        .unwrap();
+
+        let events = events.lock().unwrap().clone();
+        let states = receipt_states(&config.app_db_path);
+        let conn = rusqlite::Connection::open(&config.app_db_path).unwrap();
+        let mut statement = conn
+            .prepare("SELECT total_received_zat FROM webhook_deliveries ORDER BY delivery_id ASC")
+            .unwrap();
+        let webhook_totals = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        (events, states, webhook_totals)
+    }
+
+    #[tokio::test]
+    async fn mempool_revocation_defers_when_block_arrives_between_tip_check_and_snapshot() {
+        let (events, states, webhook_totals) = exercise_mempool_revocation_window(
+            "advanced",
+            TipConfirmation::Height(SAMPLED_TIP_HEIGHT + 1),
+        )
+        .await;
+        assert_eq!(events, ["snapshot", "tip"]);
+        assert_eq!(
+            states,
+            vec![("tx-advanced:sapling:0".to_string(), "active".to_string())]
+        );
+        assert_eq!(webhook_totals, vec![42]);
+
+        let (events, states, webhook_totals) = exercise_mempool_revocation_window(
+            "unchanged",
+            TipConfirmation::Height(SAMPLED_TIP_HEIGHT),
+        )
+        .await;
+        assert_eq!(events, ["snapshot", "tip"]);
+        assert_eq!(
+            states,
+            vec![("tx-unchanged:sapling:0".to_string(), "revoked".to_string())]
+        );
+        assert_eq!(webhook_totals, vec![42, 0]);
+
+        let (events, states, webhook_totals) =
+            exercise_mempool_revocation_window("unavailable", TipConfirmation::Unavailable).await;
+        assert_eq!(events, ["snapshot", "tip"]);
+        assert_eq!(
+            states,
+            vec![("tx-unavailable:sapling:0".to_string(), "active".to_string())]
+        );
+        assert_eq!(webhook_totals, vec![42]);
+
+        let (events, states, webhook_totals) =
+            exercise_mempool_revocation_window("skipped", TipConfirmation::NotConsulted).await;
+        assert_eq!(events, ["snapshot"]);
+        assert_eq!(
+            states,
+            vec![("tx-skipped:sapling:0".to_string(), "active".to_string())]
+        );
+        assert_eq!(webhook_totals, vec![42]);
     }
 
     #[tokio::test]
