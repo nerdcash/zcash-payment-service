@@ -171,9 +171,31 @@ async fn sync_with_lightwalletd(
             )
             .await
         },
-        |tip_height| async move {
-            reconcile_current_mempool(config, app_db, startup_uivk, lightwalletd_url, tip_height)
-                .await
+        |tip_height, revoke_missing| async move {
+            let revoke_missing = if revoke_missing {
+                match latest_block_height(lightwalletd_url).await {
+                    Ok(latest_tip_height) => latest_tip_height <= tip_height,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            scanned_tip_height = tip_height,
+                            "deferring mempool revocation because the chain tip could not be confirmed"
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            reconcile_current_mempool(
+                config,
+                app_db,
+                startup_uivk,
+                lightwalletd_url,
+                tip_height,
+                revoke_missing,
+            )
+            .await
         },
     )
     .await
@@ -207,7 +229,7 @@ where
     ReconcileOverlapBatchFuture: Future<Output = Result<ReceiptRangeReconciliation, AppError>>,
     ScanBatchesWithPipelineFn: FnOnce(u32, ScanBatch, u32, u32) -> ScanBatchesWithPipelineFuture,
     ScanBatchesWithPipelineFuture: Future<Output = Result<(Vec<i64>, i64), AppError>>,
-    ReconcileCurrentMempoolFn: FnOnce(u32) -> ReconcileCurrentMempoolFuture,
+    ReconcileCurrentMempoolFn: FnOnce(u32, bool) -> ReconcileCurrentMempoolFuture,
     ReconcileCurrentMempoolFuture: Future<Output = Result<Vec<i64>, AppError>>,
 {
     let tip_height = latest_block_height_fn(lightwalletd_url.to_string()).await?;
@@ -351,7 +373,12 @@ where
     affected_address_ids.extend(matured_address_ids);
 
     if config.webhook_report_confirmations == 0 {
-        let mempool_affected_address_ids = reconcile_current_mempool_fn(tip_height).await?;
+        // Revoke a mempool receipt that disappeared only after this iteration
+        // has scanned the tip it sampled. Otherwise the transaction may be in
+        // a block that has not been read yet, and revoking it reports a zero total.
+        let revoke_missing = new_last_scanned_height >= i64::from(tip_height);
+        let mempool_affected_address_ids =
+            reconcile_current_mempool_fn(tip_height, revoke_missing).await?;
         affected_address_ids.extend(mempool_affected_address_ids);
     }
 
@@ -432,12 +459,15 @@ async fn wait_for_next_sync_trigger(
                 config.sync_poll_interval_seconds,
                 || wait_for_block_mempool_stream(&lightwalletd_url, expected_tip_height),
                 || async {
+                    // The next block may already contain this transaction.
+                    // Keep the provisional receipt until that block is scanned.
                     reconcile_current_mempool(
                         config,
                         &app_db,
                         startup_uivk,
                         &lightwalletd_url,
                         expected_tip_height,
+                        false,
                     )
                     .await?;
                     Ok(())
@@ -545,6 +575,7 @@ async fn reconcile_current_mempool(
     startup_uivk: &str,
     lightwalletd_url: &str,
     tip_height: u32,
+    revoke_missing: bool,
 ) -> Result<Vec<i64>, AppError> {
     let mempool_txids = fetch_current_mempool_txids(lightwalletd_url).await?;
     let current_mempool_txids = mempool_txids
@@ -573,6 +604,18 @@ async fn reconcile_current_mempool(
         config.webhook_report_confirmations,
         &observed_at,
     )?;
+    if !revoke_missing {
+        let kept_absent = known_active_txids
+            .difference(&current_mempool_txids)
+            .count();
+        if kept_absent > 0 {
+            tracing::debug!(
+                kept_absent,
+                tip_height,
+                "keeping provisional mempool receipts that left the mempool until the next block scan"
+            );
+        }
+    }
     let reconciliation = app_db.reconcile_mempool_snapshot(
         &current_mempool_txids,
         &attributed,
@@ -580,6 +623,7 @@ async fn reconcile_current_mempool(
         i64::from(tip_height),
         config.finality_confirmations,
         config.webhook_report_confirmations,
+        revoke_missing,
     )?;
     let queued = app_db
         .queue_webhook_deliveries_for_dirty_addresses(&reconciliation.affected_address_ids)?;
@@ -1155,7 +1199,9 @@ mod tests {
                     Ok((reconciliation.affected_address_ids, 102))
                 }
             },
-            |_tip_height| async { unreachable!("mempool reconciliation should be disabled") },
+            |_tip_height, _revoke_missing| async {
+                unreachable!("mempool reconciliation should be disabled")
+            },
         )
         .await
         .unwrap();
@@ -1247,7 +1293,9 @@ mod tests {
             |_tip_height, first_batch, final_height, batch_size| async move {
                 panic!("unexpected forward scan during rewind: {first_batch:?} {final_height} {batch_size}")
             },
-            |_tip_height| async { unreachable!("mempool reconciliation should be disabled") },
+            |_tip_height, _revoke_missing| async {
+                unreachable!("mempool reconciliation should be disabled")
+            },
         )
         .await
         .unwrap();
@@ -1359,7 +1407,9 @@ mod tests {
                     Ok((affected, 111))
                 }
             },
-            |_tip_height| async { unreachable!("mempool reconciliation should be disabled") },
+            |_tip_height, _revoke_missing| async {
+                unreachable!("mempool reconciliation should be disabled")
+            },
         )
         .await
         .unwrap();
@@ -1395,7 +1445,9 @@ mod tests {
             |_tip_height, first_batch, final_height, batch_size| async move {
                 panic!("unexpected forward scan during second rewind: {first_batch:?} {final_height} {batch_size}")
             },
-            |_tip_height| async { unreachable!("mempool reconciliation should be disabled") },
+            |_tip_height, _revoke_missing| async {
+                unreachable!("mempool reconciliation should be disabled")
+            },
         )
         .await
         .unwrap();
@@ -1510,7 +1562,9 @@ mod tests {
                     Ok((affected, 112))
                 }
             },
-            |_tip_height| async { unreachable!("mempool reconciliation should be disabled") },
+            |_tip_height, _revoke_missing| async {
+                unreachable!("mempool reconciliation should be disabled")
+            },
         )
         .await
         .unwrap();

@@ -40,8 +40,12 @@ lightwalletd instance.
 
 When `WEBHOOK_REPORT_CONFIRMATIONS` is `0`, the service also maintains a
 reconciled view of current mempool receipts for issued addresses. Those receipts
-are provisional: they count immediately, are revoked if their transaction leaves
-the mempool, and age out after 24 hours until the transaction is confirmed.
+are provisional: they count immediately and age out after 24 hours until the
+transaction is confirmed. A receipt whose transaction leaves the mempool is kept
+until the next block has been scanned. If that block contains the transaction,
+the receipt is promoted in place and the reported total does not dip to zero.
+If the scanned block does not contain it, and the service has scanned through
+the current chain tip, the receipt is revoked.
 
 ## Configuration
 
@@ -224,7 +228,11 @@ Webhook responsibilities remain with the consuming application:
   incoming payments observed for one issued address.
 - `total_received` is not wallet balance.
 - The current named reporting threshold is 0 confirmations.
-- At a threshold of 0, mempool receipts are provisional and may later be reversed by eviction or by aging past 24 hours without confirmation.
+- At a threshold of 0, mempool receipts are provisional. They may later be
+  reversed by aging past 24 hours without confirmation, or by eviction once the
+  following block has been scanned and does not contain the transaction. A
+  transaction that leaves the mempool because it was mined does not make
+  `total_received` dip to zero.
 - The current named finality threshold is 100 confirmations.
 
 ## Local orchestration

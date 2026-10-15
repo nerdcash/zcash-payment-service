@@ -993,6 +993,7 @@ impl AppDb {
         Ok(txids)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn reconcile_mempool_snapshot(
         &self,
         current_mempool_txids: &std::collections::BTreeSet<String>,
@@ -1001,6 +1002,7 @@ impl AppDb {
         tip_height: i64,
         finality_confirmations: u32,
         webhook_report_confirmations: u32,
+        revoke_missing: bool,
     ) -> Result<ReceiptRangeReconciliation, AppError> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1056,20 +1058,25 @@ impl AppDb {
         let mut reactivated_receipt_count = 0usize;
         let mut inserted_receipt_count = 0usize;
 
-        for (receipt_uid, (txid, address_id, mined_height, receipt_state, _, _, _, _)) in
-            &existing_by_uid
-        {
-            if receipt_state == "active" && !current_mempool_txids.contains(txid) {
-                tx.execute(
-                    "UPDATE address_receipts_recent SET receipt_state = 'revoked', state_version = state_version + 1, observed_at = ?2 WHERE receipt_uid = ?1",
-                    params![receipt_uid, now],
-                )?;
-                affected_address_ids.insert(*address_id);
-                dirty_since_by_address
-                    .entry(*address_id)
-                    .and_modify(|height: &mut i64| *height = (*height).min(*mined_height))
-                    .or_insert(*mined_height);
-                revoked_receipt_count += 1;
+        // A transaction can leave the mempool because it was just mined. Revoking
+        // that receipt before the block is scanned reports a transient zero total.
+        // Callers pass revoke_missing only after the scan has reached the chain tip.
+        if revoke_missing {
+            for (receipt_uid, (txid, address_id, mined_height, receipt_state, _, _, _, _)) in
+                &existing_by_uid
+            {
+                if receipt_state == "active" && !current_mempool_txids.contains(txid) {
+                    tx.execute(
+                        "UPDATE address_receipts_recent SET receipt_state = 'revoked', state_version = state_version + 1, observed_at = ?2 WHERE receipt_uid = ?1",
+                        params![receipt_uid, now],
+                    )?;
+                    affected_address_ids.insert(*address_id);
+                    dirty_since_by_address
+                        .entry(*address_id)
+                        .and_modify(|height: &mut i64| *height = (*height).min(*mined_height))
+                        .or_insert(*mined_height);
+                    revoked_receipt_count += 1;
+                }
             }
         }
 
@@ -2741,6 +2748,7 @@ mod tests {
             1000,
             100,
             0,
+            true,
         )
         .unwrap();
 
@@ -2754,8 +2762,16 @@ mod tests {
             .unwrap();
         assert_eq!(fresh_total, 42);
 
-        db.reconcile_mempool_snapshot(&current_txids, &[], "2026-01-02T01:00:00Z", 1000, 100, 0)
-            .unwrap();
+        db.reconcile_mempool_snapshot(
+            &current_txids,
+            &[],
+            "2026-01-02T01:00:00Z",
+            1000,
+            100,
+            0,
+            true,
+        )
+        .unwrap();
 
         let stale: (i64, i64, String) = conn
             .query_row(
@@ -2809,6 +2825,7 @@ mod tests {
             1000,
             100,
             0,
+            true,
         )
         .unwrap();
 
@@ -2850,6 +2867,203 @@ mod tests {
         assert_eq!(receipt.1, 1001);
         assert_eq!(receipt.2, 75);
         assert_eq!(current_total, 75);
+    }
+
+    #[test]
+    fn absent_mempool_receipt_stays_active_until_the_mined_block_is_scanned() {
+        let temp = tempdir().unwrap();
+        let db = AppDb::open(temp.path().join("app.db")).unwrap();
+        let record = db
+            .insert_issued_address(NewIssuedAddress {
+                unified_address: "uaddr1mempool-handoff",
+                address_source: "fresh",
+                diversifier_index_be: None,
+                diversifier_bytes: None,
+                request_label: None,
+                request_memo: None,
+                request_message: None,
+                requested_amount: None,
+            })
+            .unwrap();
+        db.insert_address_receivers(
+            record.address_id,
+            &[NewAddressReceiver {
+                pool: "sapling",
+                receiver_encoding: "sapling-handoff",
+                receiver_fingerprint: &[8, 8, 8, 8, 8, 8, 8, 8],
+            }],
+        )
+        .unwrap();
+
+        db.reconcile_mempool_snapshot(
+            &std::collections::BTreeSet::from(["tx-mempool-handoff".to_string()]),
+            &[mempool_receipt(
+                record.address_id,
+                "tx-mempool-handoff",
+                "sapling",
+                "tx-mempool-handoff:sapling:0",
+                75,
+                "2026-01-01T00:00:00Z",
+            )],
+            "2026-01-01T00:00:00Z",
+            1000,
+            100,
+            0,
+            true,
+        )
+        .unwrap();
+
+        let deferred = db
+            .reconcile_mempool_snapshot(
+                &std::collections::BTreeSet::new(),
+                &[],
+                "2026-01-01T00:00:05Z",
+                1000,
+                100,
+                0,
+                false,
+            )
+            .unwrap();
+        assert_eq!(deferred.revoked_receipt_count, 0);
+
+        let conn = rusqlite::Connection::open(temp.path().join("app.db")).unwrap();
+        let before_scan: (String, String, i64, i64) = conn
+            .query_row(
+                "SELECT receipts.receipt_kind, receipts.receipt_state, totals.current_total_zat, totals.state_version FROM address_receipts_recent receipts INNER JOIN address_totals totals ON totals.address_id = receipts.address_id WHERE receipts.receipt_uid = 'tx-mempool-handoff:sapling:0'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(before_scan.0, "mempool");
+        assert_eq!(before_scan.1, "active");
+        assert_eq!(before_scan.2, 75);
+        assert_eq!(before_scan.3, 1);
+
+        db.reconcile_attributed_receipts_in_range(
+            &[mined_receipt(
+                record.address_id,
+                "tx-mempool-handoff",
+                "sapling",
+                "tx-mempool-handoff:sapling:0",
+                75,
+                1001,
+                1,
+                true,
+            )],
+            1001,
+            1001,
+            1001,
+            100,
+        )
+        .unwrap();
+
+        let after_revoke = db
+            .reconcile_mempool_snapshot(
+                &std::collections::BTreeSet::new(),
+                &[],
+                "2026-01-01T00:00:10Z",
+                1001,
+                100,
+                0,
+                true,
+            )
+            .unwrap();
+        assert_eq!(after_revoke.revoked_receipt_count, 0);
+
+        let after_scan: (String, String, i64, i64) = conn
+            .query_row(
+                "SELECT receipts.receipt_kind, receipts.receipt_state, totals.current_total_zat, totals.state_version FROM address_receipts_recent receipts INNER JOIN address_totals totals ON totals.address_id = receipts.address_id WHERE receipts.receipt_uid = 'tx-mempool-handoff:sapling:0'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(after_scan.0, "mined");
+        assert_eq!(after_scan.1, "active");
+        assert_eq!(after_scan.2, 75);
+        assert_eq!(after_scan.3, 1);
+    }
+
+    #[test]
+    fn absent_mempool_receipt_is_revoked_after_the_following_block_scan() {
+        let temp = tempdir().unwrap();
+        let db = AppDb::open(temp.path().join("app.db")).unwrap();
+        let record = db
+            .insert_issued_address(NewIssuedAddress {
+                unified_address: "uaddr1mempool-evict",
+                address_source: "fresh",
+                diversifier_index_be: None,
+                diversifier_bytes: None,
+                request_label: None,
+                request_memo: None,
+                request_message: None,
+                requested_amount: None,
+            })
+            .unwrap();
+        db.insert_address_receivers(
+            record.address_id,
+            &[NewAddressReceiver {
+                pool: "sapling",
+                receiver_encoding: "sapling-evict",
+                receiver_fingerprint: &[7, 7, 7, 7, 7, 7, 7, 7],
+            }],
+        )
+        .unwrap();
+
+        db.reconcile_mempool_snapshot(
+            &std::collections::BTreeSet::from(["tx-mempool-evict".to_string()]),
+            &[mempool_receipt(
+                record.address_id,
+                "tx-mempool-evict",
+                "sapling",
+                "tx-mempool-evict:sapling:0",
+                42,
+                "2026-01-01T00:00:00Z",
+            )],
+            "2026-01-01T00:00:00Z",
+            1000,
+            100,
+            0,
+            true,
+        )
+        .unwrap();
+
+        let deferred = db
+            .reconcile_mempool_snapshot(
+                &std::collections::BTreeSet::new(),
+                &[],
+                "2026-01-01T00:00:05Z",
+                1000,
+                100,
+                0,
+                false,
+            )
+            .unwrap();
+        assert_eq!(deferred.revoked_receipt_count, 0);
+
+        let revoked = db
+            .reconcile_mempool_snapshot(
+                &std::collections::BTreeSet::new(),
+                &[],
+                "2026-01-01T00:01:20Z",
+                1001,
+                100,
+                0,
+                true,
+            )
+            .unwrap();
+        assert_eq!(revoked.revoked_receipt_count, 1);
+
+        let conn = rusqlite::Connection::open(temp.path().join("app.db")).unwrap();
+        let receipt: (String, i64, i64) = conn
+            .query_row(
+                "SELECT receipts.receipt_state, totals.current_total_zat, totals.state_version FROM address_receipts_recent receipts INNER JOIN address_totals totals ON totals.address_id = receipts.address_id WHERE receipts.receipt_uid = 'tx-mempool-evict:sapling:0'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(receipt.0, "revoked");
+        assert_eq!(receipt.1, 0);
+        assert_eq!(receipt.2, 2);
     }
 
     #[test]
