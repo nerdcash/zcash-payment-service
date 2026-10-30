@@ -1,0 +1,11 @@
+[book]
+title = "zcash-payment-service"
+description = "Run the Zcash payment service and accept payments from your application."
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/nerdcash/zcash-payment-service"
+edit-url-template = "https://github.com/nerdcash/zcash-payment-service/edit/main/book/src/{path}"
+site-url = "/zcash-payment-service/"
+preferred-dark-theme = "navy"

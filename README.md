@@ -25,11 +25,10 @@ unavailable.
 
 ## Quick start
 
-1. Copy `.env.example` to `.env`.
-2. Fill in `ZCASH_UIVK`, `ZCASH_BIRTHDAY_HEIGHT`, and `LIGHTWALLETD_URL`.
-3. Optionally set `ZCASH_WEBHOOK_URL` and `ZCASH_WEBHOOK_SECRET` if you want the
+1. Set `ZCASH_UIVK`, `ZCASH_BIRTHDAY_HEIGHT`, and `LIGHTWALLETD_URL`. Docker Compose reads a `.env` file next to `docker-compose.yml` for the `${...}` substitutions in that file.
+2. Optionally set `ZCASH_WEBHOOK_URL` and `ZCASH_WEBHOOK_SECRET` if you want the
    service to push observations back into your app.
-4. Start the service.
+3. Start the service.
 
 From source:
 
@@ -211,6 +210,9 @@ Important environment variables for the current implementation:
 
 ## Documentation map
 
+- `book/` — mdBook guide (overview, getting started, integration, API
+  reference, deployment), published to GitHub Pages by
+  `.github/workflows/pages.yml`
 - `docs/consuming.md` — practical guide for integrating another app with the
   service as a container or crate
 - `design.md` — service design decisions and invariants
