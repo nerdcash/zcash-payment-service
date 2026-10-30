@@ -412,7 +412,15 @@ where
         tokio::select! {
             result = &mut stream => return result,
             _ = interval.tick() => {
-                if latest_height().await? > expected_tip_height {
+                // Keep watching the stream while the tip request runs, so a
+                // slow or retrying tip check never hides a stream close.
+                let tip_check = latest_height();
+                tokio::pin!(tip_check);
+                let tip_height = tokio::select! {
+                    result = &mut stream => return result,
+                    tip_height = &mut tip_check => tip_height?,
+                };
+                if tip_height > expected_tip_height {
                     tracing::debug!(
                         expected_tip_height,
                         "chain tip advanced while the mempool stream was still open"
@@ -1323,6 +1331,40 @@ mod tests {
 
         assert!(result.expect("tip polling must end the wait").is_ok());
         assert_eq!(polls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mempool_wait_observes_stream_close_while_tip_check_is_stalled() {
+        let tip_checks = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let tip_checks_clone = Arc::clone(&tip_checks);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            wait_for_block_mempool_stream_with(
+                100,
+                Duration::from_secs(15),
+                move || {
+                    let tip_checks = Arc::clone(&tip_checks_clone);
+                    async move {
+                        // The first check answers; later ones hang forever.
+                        if tip_checks.fetch_add(1, Ordering::SeqCst) == 0 {
+                            Ok(100)
+                        } else {
+                            std::future::pending::<Result<u32, AppError>>().await
+                        }
+                    }
+                },
+                // The stream closes (a block was mined) after the tip check stalls.
+                || async {
+                    tokio::time::sleep(Duration::from_secs(20)).await;
+                    Ok(())
+                },
+            ),
+        )
+        .await;
+
+        assert!(result.expect("stream close must end the wait").is_ok());
+        assert_eq!(tip_checks.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test(start_paused = true)]
