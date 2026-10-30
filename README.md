@@ -210,6 +210,10 @@ Important environment variables for the current implementation:
 
 ## Documentation map
 
+- `CONTRIBUTING.md` — the components in this repo, how each is released, and
+  which changes must be mirrored across the service, the Node client, and the docs
+- `clients/node/` — the `@nerdcash/zcash-payment-client` npm package
+
 - `book/` — mdBook guide (overview, getting started, integration, API
   reference, deployment), published to GitHub Pages by
   `.github/workflows/pages.yml`

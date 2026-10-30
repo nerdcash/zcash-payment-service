@@ -40,7 +40,7 @@ const session = await payments.createPaymentSession({
   amount: "0.05000000", // ZEC, as a decimal string
 });
 // session.address -> show to the customer
-// session.qr_text -> render as a QR code
+// session.qr_text -> render as a QR code (see "Rendering the QR code" below)
 
 // Webhook: verify against the *raw* request body.
 const app = express();
@@ -57,6 +57,23 @@ app.post("/webhooks/zcash-payments", express.raw({ type: "application/json" }), 
   }
 });
 ```
+
+### Rendering the QR code
+
+`qr_text` is a `zcash:` payment URI. Any QR library works. [`qrcode`](https://www.npmjs.com/package/qrcode)
+runs both in Node and in the browser:
+
+```ts
+import QRCode from "qrcode";
+
+// Server side: inline SVG for your checkout page.
+const svg = await QRCode.toString(session.qr_text, { type: "svg", errorCorrectionLevel: "M" });
+
+// Or in the browser: draw onto a <canvas>.
+await QRCode.toCanvas(document.querySelector("canvas")!, session.qr_text);
+```
+
+Also show `address` as copyable text, and link the `qr_text` URI (`<a href="zcash:...">`) so a wallet on the same device can open it.
 
 ### API
 
