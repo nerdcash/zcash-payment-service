@@ -135,6 +135,8 @@ The stored JSON is `serde_json::to_string` of these fields, in this order:
 
 `state_version` increments by one when `current_total_zat` changes. `current_total_zat` is the sum of `value_zat` over receipts for that address that are `active` and `eligible_for_webhook`. A delivery is inserted when `dirty_state` is `dirty` and the current total differs from `last_notified_total_zat`. `event_id` is unique, and the insert is `INSERT OR IGNORE`.
 
+`claim_ready_webhook_delivery` takes the oldest row that is `queued`, or `retry_wait` with `next_attempt_at` already due, ordered by `observed_at` then `delivery_id`. A newer queued delivery can be sent while an older one is still in `retry_wait`. Receivers should keep the highest `state_version` they have applied for an address. A later delivery of a lower version is an older total, including after a reorg where the newer total is smaller.
+
 Eligibility:
 
 - Mined receipt: confirmation depth is `tip_height - mined_height + 1` when `tip_height >= mined_height`, else `0`. Eligible when the depth is `>= webhook_report_confirmations`.

@@ -9,8 +9,11 @@ on:
 permissions:
   contents: read
 
+# A pending run replaces an older pending run in the same group, even when
+# cancel-in-progress is false. Key the group on the ref so a pull request
+# cannot drop a queued deploy from main.
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:

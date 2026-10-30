@@ -7,7 +7,7 @@ Your application:
 - Prices the order and creates the invoice.
 - Calls `POST /payment-session` when a payer is ready to pay.
 - Shows the address and a QR code.
-- Receives the webhook, checks `X-Signature`, and deduplicates on `event_id`.
+- Receives the webhook, checks `X-Signature`, and applies it when its `state_version` is newer than the last version stored for that address.
 - Decides when `total_received` covers the invoice.
 
 The service stores the requested amount, memo, message, and label beside the address. It does not compare the amount it observes with the amount you requested. `total_received` is the cumulative eligible incoming total for that one address, in ZEC. It is not a wallet balance.
@@ -102,7 +102,9 @@ The body is compact JSON produced by `serde_json::to_string`. The signed bytes a
 - At threshold `0`, a mempool note is eligible while its `first_observed_at` is later than 24 hours before the check. After that it stops counting. If the transaction leaves the mempool, the service keeps the provisional receipt until it has scanned the next block. When that block contains the transaction, the receipt is promoted in place. When the scanned tip does not contain it, the receipt is revoked.
 - `FINALITY_CONFIRMATIONS` defaults to `100`. It is the depth used for checkpointing. It does not gate `total_received`.
 
-`total_received` can go up or down. Treat each webhook as the new cumulative total for that address, and deduplicate with `event_id`.
+`total_received` can go up or down. A reorg or an expired mempool note lowers it and still gets a higher `state_version`.
+
+Apply a webhook only when its `state_version` is greater than the last version you stored for that address. `claim_ready_webhook_delivery` claims the oldest row that is `queued`, or `retry_wait` whose `next_attempt_at` has arrived. A newer `queued` delivery can succeed while an older one is still waiting to retry, and that older `event_id` can arrive later. Return 2xx for the stale event and leave the invoice unchanged, so the service stops retrying it. The same `event_id` is also safe to acknowledge again.
 
 ### Checking the signature
 
@@ -144,6 +146,7 @@ The delay after a retryable failure is `WEBHOOK_RETRY_DELAY_SECONDS` (default `3
 1. Read the raw body.
 2. Recompute the HMAC and compare it to `X-Signature`.
 3. Parse the JSON.
-4. If you have already applied `event_id`, return 2xx.
-5. Store `total_received` for `address` and update the invoice.
-6. Return a 2xx status. Any other success-range status counts. `4xx` other than `429` will not be retried.
+4. Read `state_version` from `event_id` (`zcash:<address_id>:v<state_version>`).
+5. If this `event_id` is already applied, or its `state_version` is less than or equal to the last version stored for `address`, return 2xx and leave the invoice unchanged.
+6. Otherwise store `total_received` as the cumulative total for that address and update the invoice. Compare the version, because a newer total can be smaller.
+7. Return a 2xx status. Any other success-range status counts. `4xx` other than `429` will not be retried.
