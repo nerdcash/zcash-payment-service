@@ -76,7 +76,27 @@ fn open_wallet_db(path: &Path, network_name: &str) -> Result<SqliteWalletDb, App
     }
 
     let network = consensus_network(network_name)?;
-    WalletDb::for_path(path, network, SystemClock, UnwrapErr(SysRng)).map_err(AppError::Database)
+    let conn = open_wallet_connection(path)?;
+    rusqlite::vtab::array::load_module(&conn)?;
+    Ok(WalletDb::from_connection(
+        conn,
+        network,
+        SystemClock,
+        UnwrapErr(SysRng),
+    ))
+}
+
+/// How long a wallet database connection waits for another connection's lock
+/// before failing with "database is locked". Matches the app database.
+const WALLET_DB_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Opens a wallet database connection that waits for locks instead of failing
+/// at once. `WalletDb::for_path` sets no busy timeout, so a scan or migration
+/// overlapping another open (as at startup) could fail immediately.
+fn open_wallet_connection(path: &Path) -> Result<Connection, AppError> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(WALLET_DB_BUSY_TIMEOUT)?;
+    Ok(conn)
 }
 
 fn open_migrated_wallet_db(path: &Path, network_name: &str) -> Result<SqliteWalletDb, AppError> {
@@ -132,7 +152,7 @@ pub fn read_wallet_db_identity(path: &Path) -> Result<Option<WalletDbIdentity>, 
         return Ok(None);
     }
 
-    let conn = Connection::open(path)?;
+    let conn = open_wallet_connection(path)?;
     let query_result = conn
         .query_row(
             "SELECT uivk, birthday_height FROM accounts ORDER BY rowid ASC LIMIT 1",
@@ -163,6 +183,34 @@ mod tests {
         sync::{Arc, Barrier},
         thread,
     };
+
+    #[test]
+    fn wallet_connections_wait_for_locks() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = super::open_wallet_connection(&temp.path().join("wallet.db")).unwrap();
+        let timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5_000);
+    }
+
+    #[test]
+    fn a_wallet_open_waits_out_a_short_write_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("wallet.db");
+        let holder = rusqlite::Connection::open(&path).unwrap();
+        holder
+            .execute_batch("CREATE TABLE t (x); BEGIN EXCLUSIVE;")
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            holder.execute_batch("COMMIT").unwrap();
+        });
+
+        let conn = super::open_wallet_connection(&path).unwrap();
+        conn.execute("INSERT INTO t (x) VALUES (1)", []).unwrap();
+        release.join().unwrap();
+    }
 
     use tempfile::tempdir;
 
