@@ -703,6 +703,34 @@ where
     scan_compact_blocks_with_scanning_keys(network_name, scanning_keys, blocks)
 }
 
+/// Parses raw mempool transactions under the consensus branch of the block
+/// after `chain_tip_height`, the block they target (this matters at upgrade
+/// boundaries such as NU7 activation). A transaction that fails to parse is
+/// logged and skipped, so it cannot hide other mempool payments; block
+/// scanning still finds it once mined.
+fn parse_mempool_transactions(
+    network: &zcash_protocol::consensus::Network,
+    chain_tip_height: BlockHeight,
+    transactions: impl IntoIterator<Item = RawTransaction>,
+) -> Vec<Transaction> {
+    let branch_id = BranchId::for_height(network, chain_tip_height + 1);
+    transactions
+        .into_iter()
+        .filter_map(|raw_transaction| {
+            match Transaction::read(&raw_transaction.data[..], branch_id) {
+                Ok(transaction) => Some(transaction),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "skipping mempool transaction that failed to parse"
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 pub fn scan_incoming_mempool_receipts_from_raw_transactions(
     network_name: &str,
     encoded_uivk: &str,
@@ -723,24 +751,7 @@ pub fn scan_incoming_mempool_receipts_from_raw_transactions(
     let sapling_pivk = uivk.sapling().as_ref().map(|ivk| ivk.prepare());
     let orchard_pivk = uivk.orchard().as_ref().map(|ivk| ivk.prepare());
 
-    // Mempool transactions target the block after the current tip, so parse
-    // them under that height's consensus branch (this matters at upgrade
-    // boundaries such as NU7 activation).
-    let mempool_branch_id = BranchId::for_height(&network, chain_tip_height + 1);
-
-    for raw_transaction in transactions {
-        // One transaction this build cannot parse must not hide every other
-        // mempool payment, so skip it and let block scanning find it later.
-        let transaction = match Transaction::read(&raw_transaction.data[..], mempool_branch_id) {
-            Ok(transaction) => transaction,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "skipping mempool transaction that failed to parse"
-                );
-                continue;
-            }
-        };
+    for transaction in parse_mempool_transactions(&network, chain_tip_height, transactions) {
         let txid_hex = transaction.txid().to_string();
 
         if let (Some(bundle), Some(pivk)) = (transaction.sapling_bundle(), sapling_pivk.as_ref()) {
@@ -1416,6 +1427,30 @@ mod tests {
 
         // The fixture pays a different wallet; the point is that it parses.
         assert!(receipts.is_empty());
+    }
+
+    #[test]
+    fn mempool_parse_keeps_valid_transactions_after_a_parse_failure() {
+        let malformed = || RawTransaction {
+            data: vec![0xde, 0xad, 0xbe, 0xef],
+            height: 0,
+        };
+        let nu7 = RawTransaction {
+            data: hex::decode(NU7_TESTNET_TX_HEX.trim()).unwrap(),
+            height: 0,
+        };
+
+        let parsed = super::parse_mempool_transactions(
+            &zcash_protocol::consensus::Network::TestNetwork,
+            BlockHeight::from_u32(4_559_068),
+            [malformed(), nu7, malformed()],
+        );
+
+        let txids = parsed
+            .iter()
+            .map(|transaction| transaction.txid().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(txids, vec![NU7_TESTNET_TXID.to_string()]);
     }
 
     #[test]
