@@ -1,0 +1,12 @@
+[book]
+title = "zcash-payment-service"
+description = "Run the Zcash payment service and accept payments from your application."
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/nerdcash/zcash-payment-service"
+# mdBook 0.5 puts the source directory in {path}, so this is book/src/overview.md.
+edit-url-template = "https://github.com/nerdcash/zcash-payment-service/edit/main/book/{path}"
+site-url = "/zcash-payment-service/"
+preferred-dark-theme = "navy"

@@ -1,7 +1,8 @@
 # Consuming zcash-payment-service
 
-This guide is for application developers who want to integrate
-`zcash-payment-service` without reading the entire codebase first.
+The published guide is the mdBook in `book/`. This page is the shorter
+integration note for application developers who want to wire the service
+without reading the entire codebase first.
 
 ## Choose an integration mode
 
@@ -46,7 +47,8 @@ Set these as well if you want automatic callbacks:
 - `ZCASH_WEBHOOK_URL`
 - `ZCASH_WEBHOOK_SECRET`
 
-Copy `.env.example` to `.env` for local development.
+For a local Compose stack, put those variables in a `.env` file next to
+`docker-compose.yml`, or export them in the shell.
 
 ### 2. Start the service
 
