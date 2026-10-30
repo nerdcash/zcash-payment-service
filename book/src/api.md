@@ -231,6 +231,8 @@ On a later start:
 
 The scan loop builds keys from the environment variable `ZCASH_UIVK` on every iteration, not from the stored identity alone. Lightwalletd calls in `src/scanner.rs` request blocks by height, the latest block, tree state, the mempool stream, mempool transaction ids, and raw transactions by id. Those requests do not send the UIVK. Decryption uses scanning keys built locally from that UIVK.
 
+The service keeps one shared connection to lightwalletd. It sends HTTP/2 and TCP keepalives on it, bounds connect and unary requests with timeouts, and polls the chain tip every 15 seconds while it waits on the mempool stream. A connection that drops silently is replaced within about half a minute instead of stalling block and mempool scanning until the operating system gives up on it.
+
 ## Crate entry points
 
 `src/lib.rs` exports these modules: `config`, `constants`, `db`, `error`, `logging`, `receipt_ingest`, `scanner`, `service`, `wallet_db`, `wallet_runtime`, `webhook_delivery`, `zcash`.

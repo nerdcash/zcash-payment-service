@@ -34,6 +34,19 @@ use crate::{
 
 const LIGHTWALLETD_RETRY_ATTEMPT_LIMIT: u32 = 3;
 const LIGHTWALLETD_RETRY_DELAY: Duration = Duration::from_secs(2);
+/// Bounds how long a TCP connect or TLS handshake to lightwalletd may take.
+const LIGHTWALLETD_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Interval between HTTP/2 PINGs on the shared lightwalletd connection.
+/// A silently dropped connection otherwise hangs every call multiplexed on it
+/// until the OS gives up on TCP retransmits, which can take many minutes.
+const LIGHTWALLETD_HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+/// How long to wait for a PING acknowledgement before closing the connection.
+const LIGHTWALLETD_HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upper bound on a unary lightwalletd request (or a short snapshot stream).
+const LIGHTWALLETD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// While parked on the mempool stream, also poll the chain tip this often so a
+/// stalled stream cannot delay block scanning.
+pub const MEMPOOL_STREAM_TIP_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
 fn lightwalletd_channels() -> &'static Mutex<HashMap<String, Channel>> {
     static CHANNELS: OnceLock<Mutex<HashMap<String, Channel>>> = OnceLock::new();
@@ -65,11 +78,17 @@ async fn get_lightwalletd_channel(lightwalletd_url: &str) -> Result<Channel, App
     }
 
     let uri = parse_lightwalletd_uri(lightwalletd_url)?;
-    let mut endpoint = Endpoint::from_shared(lightwalletd_url.to_string()).map_err(|error| {
-        AppError::InvalidConfig(format!(
-            "LIGHTWALLETD_URL must be a valid endpoint; got {lightwalletd_url}: {error}"
-        ))
-    })?;
+    let mut endpoint = Endpoint::from_shared(lightwalletd_url.to_string())
+        .map_err(|error| {
+            AppError::InvalidConfig(format!(
+                "LIGHTWALLETD_URL must be a valid endpoint; got {lightwalletd_url}: {error}"
+            ))
+        })?
+        .connect_timeout(LIGHTWALLETD_CONNECT_TIMEOUT)
+        .tcp_keepalive(Some(LIGHTWALLETD_HTTP2_KEEPALIVE_INTERVAL))
+        .http2_keep_alive_interval(LIGHTWALLETD_HTTP2_KEEPALIVE_INTERVAL)
+        .keep_alive_timeout(LIGHTWALLETD_HTTP2_KEEPALIVE_TIMEOUT)
+        .keep_alive_while_idle(true);
 
     if uri.scheme_str() == Some("https") {
         let host = uri.host().ok_or_else(|| {
@@ -149,6 +168,26 @@ where
             }
             Err(error) => return Err(error),
         }
+    }
+}
+
+/// Fails a lightwalletd call that does not finish within `limit`, as a
+/// retryable wallet error, so a stalled connection cannot hang the sync loop.
+async fn with_request_timeout<T, F>(
+    limit: Duration,
+    lightwalletd_url: &str,
+    operation_name: &str,
+    future: F,
+) -> Result<T, AppError>
+where
+    F: Future<Output = Result<T, AppError>>,
+{
+    match tokio::time::timeout(limit, future).await {
+        Ok(result) => result,
+        Err(_) => Err(AppError::Wallet(format!(
+            "{operation_name} against {lightwalletd_url} timed out after {}s",
+            limit.as_secs()
+        ))),
     }
 }
 
@@ -241,21 +280,25 @@ pub async fn fetch_compact_blocks_for_heights(
 }
 
 pub async fn latest_block_height(lightwalletd_url: &str) -> Result<u32, AppError> {
-    let response = with_lightwalletd_retry(
-        lightwalletd_url,
-        "fetch latest block",
-        move |mut client| async move {
-            client
-                .get_latest_block(ChainSpec::default())
-                .await
-                .map_err(|error| {
-                    AppError::Wallet(format!(
-                        "failed to fetch latest block from {lightwalletd_url}: {error}"
-                    ))
-                })
-        },
-    )
-    .await?;
+    let response =
+        with_lightwalletd_retry(lightwalletd_url, "fetch latest block", move |mut client| {
+            with_request_timeout(
+                LIGHTWALLETD_REQUEST_TIMEOUT,
+                lightwalletd_url,
+                "fetch latest block",
+                async move {
+                    client
+                        .get_latest_block(ChainSpec::default())
+                        .await
+                        .map_err(|error| {
+                            AppError::Wallet(format!(
+                                "failed to fetch latest block from {lightwalletd_url}: {error}"
+                            ))
+                        })
+                },
+            )
+        })
+        .await?;
     u32::try_from(response.get_ref().height)
         .map_err(|_| AppError::Wallet("latest lightwalletd height overflowed u32".into()))
 }
@@ -316,6 +359,7 @@ pub async fn wait_for_block_mempool_stream(
 
     wait_for_block_mempool_stream_with(
         expected_tip_height,
+        MEMPOOL_STREAM_TIP_POLL_INTERVAL,
         || latest_block_height(lightwalletd_url),
         || async {
             while stream
@@ -342,11 +386,12 @@ async fn wait_for_block_mempool_stream_with<
     WaitForStreamFuture,
 >(
     expected_tip_height: u32,
-    latest_height: LatestHeight,
+    tip_poll_interval: Duration,
+    mut latest_height: LatestHeight,
     wait_for_stream: WaitForStream,
 ) -> Result<(), AppError>
 where
-    LatestHeight: FnOnce() -> LatestHeightFuture,
+    LatestHeight: FnMut() -> LatestHeightFuture,
     LatestHeightFuture: Future<Output = Result<u32, AppError>>,
     WaitForStream: FnOnce() -> WaitForStreamFuture,
     WaitForStreamFuture: Future<Output = Result<(), AppError>>,
@@ -355,34 +400,62 @@ where
         return Ok(());
     }
 
-    wait_for_stream().await
+    // lightwalletd ends the mempool stream when a block is mined, but a stream
+    // on a half-open connection may never end. Poll the tip independently so
+    // block scanning keeps moving even if the stream stalls.
+    let stream = wait_for_stream();
+    tokio::pin!(stream);
+    let mut interval = tokio::time::interval(tip_poll_interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            result = &mut stream => return result,
+            _ = interval.tick() => {
+                if latest_height().await? > expected_tip_height {
+                    tracing::debug!(
+                        expected_tip_height,
+                        "chain tip advanced while the mempool stream was still open"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+    }
 }
 
 pub async fn fetch_current_mempool_txids(lightwalletd_url: &str) -> Result<Vec<Vec<u8>>, AppError> {
     with_lightwalletd_retry(
         lightwalletd_url,
         "fetch mempool snapshot",
-        move |mut client| async move {
-            let mut stream = client
-                .get_mempool_tx(GetMempoolTxRequest::default())
-                .await
-                .map_err(|error| {
-                    AppError::Wallet(format!(
+        move |mut client| {
+            with_request_timeout(
+                LIGHTWALLETD_REQUEST_TIMEOUT,
+                lightwalletd_url,
+                "fetch mempool snapshot",
+                async move {
+                    let mut stream = client
+                        .get_mempool_tx(GetMempoolTxRequest::default())
+                        .await
+                        .map_err(|error| {
+                            AppError::Wallet(format!(
                         "failed to request mempool snapshot from {lightwalletd_url}: {error}"
                     ))
-                })?
-                .into_inner();
+                        })?
+                        .into_inner();
 
-            let mut txids = Vec::new();
-            while let Some(transaction) = stream.message().await.map_err(|error| {
-                AppError::Wallet(format!(
-                    "failed to read mempool snapshot from {lightwalletd_url}: {error}"
-                ))
-            })? {
-                txids.push(transaction.txid);
-            }
+                    let mut txids = Vec::new();
+                    while let Some(transaction) = stream.message().await.map_err(|error| {
+                        AppError::Wallet(format!(
+                            "failed to read mempool snapshot from {lightwalletd_url}: {error}"
+                        ))
+                    })? {
+                        txids.push(transaction.txid);
+                    }
 
-            Ok(txids)
+                    Ok(txids)
+                },
+            )
         },
     )
     .await
@@ -405,12 +478,21 @@ pub async fn fetch_raw_transactions_by_txids(
             move |mut client| {
                 let txid = txid.clone();
                 async move {
-                    match client
-                        .get_transaction(TxFilter {
+                    let response = tokio::time::timeout(
+                        LIGHTWALLETD_REQUEST_TIMEOUT,
+                        client.get_transaction(TxFilter {
                             hash: txid.clone(),
                             ..Default::default()
-                        })
-                        .await
+                        }),
+                    )
+                    .await
+                    .map_err(|_| {
+                        AppError::Wallet(format!(
+                            "fetch mempool transaction against {lightwalletd_url} timed out after {}s",
+                            LIGHTWALLETD_REQUEST_TIMEOUT.as_secs()
+                        ))
+                    })?;
+                    match response
                     {
                         Ok(response) => Ok(Some(response.into_inner())),
                         Err(status) if missing_mempool_transaction_is_benign(&status) => {
@@ -814,10 +896,12 @@ fn receiver_fingerprint(bytes: Vec<u8>) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use super::{is_retryable_lightwalletd_error, with_request_timeout};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     };
+    use std::time::Duration;
 
     use tempfile::tempdir;
     use tonic::Status;
@@ -1180,6 +1264,7 @@ mod tests {
 
         wait_for_block_mempool_stream_with(
             100,
+            Duration::from_secs(15),
             || async { Ok(101) },
             move || async move {
                 stream_waited_clone.store(true, Ordering::SeqCst);
@@ -1199,6 +1284,7 @@ mod tests {
 
         wait_for_block_mempool_stream_with(
             100,
+            Duration::from_secs(15),
             || async { Ok(100) },
             move || async move {
                 stream_waited_clone.store(true, Ordering::SeqCst);
@@ -1209,6 +1295,49 @@ mod tests {
         .unwrap();
 
         assert!(stream_waited.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mempool_wait_returns_when_tip_advances_while_stream_is_stalled() {
+        let polls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let polls_clone = Arc::clone(&polls);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(120),
+            wait_for_block_mempool_stream_with(
+                100,
+                Duration::from_secs(15),
+                move || {
+                    let polls = Arc::clone(&polls_clone);
+                    async move {
+                        // Tip is unchanged on the first two checks, then advances.
+                        let n = polls.fetch_add(1, Ordering::SeqCst);
+                        Ok(if n < 2 { 100 } else { 101 })
+                    }
+                },
+                // A stream on a dead connection never yields.
+                std::future::pending::<Result<(), AppError>>,
+            ),
+        )
+        .await;
+
+        assert!(result.expect("tip polling must end the wait").is_ok());
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn request_timeout_turns_a_hung_call_into_a_retryable_error() {
+        let error = with_request_timeout(
+            Duration::from_secs(30),
+            "https://example.invalid:443",
+            "fetch latest block",
+            std::future::pending::<Result<(), AppError>>(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(is_retryable_lightwalletd_error(&error));
+        assert!(error.to_string().contains("timed out after 30s"));
     }
 
     #[test]
