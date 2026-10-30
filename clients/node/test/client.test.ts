@@ -91,6 +91,26 @@ describe("createPaymentSession", () => {
     });
   });
 
+  it("reports a failed response body read as a service error", async () => {
+    const client = createZcashPaymentClient({
+      baseUrl: "http://service.test",
+      webhookSecret: SECRET,
+      fetchImpl: (async () => {
+        const body = new ReadableStream({
+          start(controller) {
+            controller.error(new TypeError("terminated"));
+          },
+        });
+        return new Response(body, { status: 200 });
+      }) as typeof fetch,
+    });
+    await assert.rejects(client.createPaymentSession({}), (error: unknown) => {
+      assert.ok(error instanceof PaymentServiceError);
+      assert.equal(error.status, 200);
+      return true;
+    });
+  });
+
   it("requires a webhook secret", () => {
     assert.throws(() => createZcashPaymentClient({ baseUrl: "http://service.test", webhookSecret: "" }));
   });

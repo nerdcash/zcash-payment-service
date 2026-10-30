@@ -12,7 +12,11 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "sideEffects": false,
   "engines": {
     "node": ">=20"
@@ -24,10 +28,14 @@
   },
   "homepage": "https://github.com/nerdcash/zcash-payment-service/tree/main/clients/node#readme",
   "bugs": "https://github.com/nerdcash/zcash-payment-service/issues",
-  "keywords": ["zcash", "payments", "webhook", "zec"],
+  "keywords": [
+    "zcash",
+    "payments",
+    "webhook",
+    "zec"
+  ],
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

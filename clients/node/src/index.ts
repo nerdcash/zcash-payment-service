@@ -138,7 +138,12 @@ function serviceUrl(baseUrl: string, pathname: string): string {
 }
 
 async function readBody(response: Response): Promise<unknown> {
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    throw new PaymentServiceError("payment service response could not be read", response.status);
+  }
   if (!response.ok) {
     throw new PaymentServiceError(errorDetail(text, response.statusText), response.status);
   }
