@@ -102,6 +102,7 @@ mod tests {
             log_dir: temp.join("logs"),
             catch_up_threshold_blocks: 1,
             catch_up_batch_size: 100,
+            scan_parallelism: 2,
             sync_poll_interval_seconds: 5,
             webhook_url: None,
             webhook_secret: None,

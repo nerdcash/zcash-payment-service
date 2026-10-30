@@ -162,6 +162,7 @@ Delivery outcomes are in the [integration guide](integration.md#retries). On sta
 | `LOG_DIR` | `<APP_DATA_DIR>/logs` | Daily JSON file `zcash-payment.log`. |
 | `CATCH_UP_THRESHOLD_BLOCKS` | `1` | Parses as `u32`, including `0`. |
 | `CATCH_UP_BATCH_SIZE` | `100` | `u32`, must be greater than 0. |
+| `SCAN_PARALLELISM` | number of CPUs the process may use | `usize`, must be greater than 0. Caps the threads used to trial-decrypt compact blocks. `1` scans serially. See [Deployment](deployment.md#scan-parallelism). |
 | `SYNC_POLL_INTERVAL_SECONDS` | `5` | `u64`, must be greater than 0. Fallback delay when the mempool stream is unavailable. |
 | `ZCASH_WEBHOOK_URL` | unset | Absolute `http` or `https` URL with a host. |
 | `ZCASH_WEBHOOK_SECRET` | unset | HMAC key. Delivery runs only when this and the URL are both set. |
@@ -179,6 +180,7 @@ A value that fails its parse or range check returns `InvalidConfig` and the proc
 - `ZCASH_BIRTHDAY_HEIGHT must be a positive integer` (the parse failed; a numeric `u32`, including `0`, is accepted)
 - `CATCH_UP_THRESHOLD_BLOCKS must be a non-negative integer`
 - `CATCH_UP_BATCH_SIZE must be a positive integer` or `CATCH_UP_BATCH_SIZE must be greater than zero`
+- `SCAN_PARALLELISM must be a positive integer` or `SCAN_PARALLELISM must be greater than zero`
 - the same pair of messages for `SYNC_POLL_INTERVAL_SECONDS`, `WEBHOOK_POLL_INTERVAL_SECONDS`, `WEBHOOK_RETRY_DELAY_SECONDS`, `WEBHOOK_RETRY_MAX_DELAY_SECONDS`, and `WEBHOOK_MAX_ATTEMPTS`
 - `WEBHOOK_REPORT_CONFIRMATIONS must be a non-negative integer`
 - `FINALITY_CONFIRMATIONS must be a non-negative integer`

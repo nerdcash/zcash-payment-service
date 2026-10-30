@@ -3616,6 +3616,7 @@ dependencies = [
  "incrementalmerkletree",
  "orchard",
  "rand 0.10.3",
+ "rayon",
  "reqwest",
  "rusqlite",
  "sapling-crypto",

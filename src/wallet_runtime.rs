@@ -5,7 +5,8 @@ use crate::{
     receipt_ingest::attribute_scanned_receipts,
     scanner::{
         fetch_compact_blocks_for_height_range, fetch_current_mempool_txids,
-        fetch_raw_transactions_by_txids, latest_block_height, scan_compact_blocks_for_wallet,
+        fetch_raw_transactions_by_txids, latest_block_height,
+        scan_compact_blocks_for_wallet_in_pool,
         scan_incoming_mempool_receipts_from_raw_transactions, wait_for_block_mempool_stream,
     },
     wallet_db::initialize_wallet_db,
@@ -22,8 +23,42 @@ const STATE_SYNCED: &str = "synced";
 const STATE_CATCHING_UP: &str = "catching_up";
 const STATE_BLOCKED_SCANNING_KEY_MATERIAL: &str = "blocked_scanning_key_material";
 const STATE_BLOCKED_LIGHTWALLETD_ENDPOINT: &str = "blocked_lightwalletd_endpoint";
-const DOWNLOAD_PIPELINE_DEPTH: usize = 2;
+/// How many downloaded batches may wait for the scanner.
+const DOWNLOAD_PIPELINE_DEPTH: usize = 4;
+/// How many compact-block range requests may be in flight at once during
+/// catch-up. Batches are still handed to the scanner in height order.
+const DOWNLOAD_CONCURRENCY: usize = 3;
 const MIN_CATCH_UP_PROGRESS_LOG_INTERVAL_BLOCKS: u32 = 1_000;
+
+/// Returns the dedicated rayon pool for trial decryption, sized by
+/// `SCAN_PARALLELISM`. The pool is built once and reused; it is rebuilt only if
+/// a different size is requested (tests use several configs in one process).
+/// A dedicated pool keeps scanning off rayon's global pool, so other work in an
+/// embedding process is not starved and the cap is actually enforced.
+fn scan_thread_pool(parallelism: usize) -> Result<Arc<rayon::ThreadPool>, AppError> {
+    static POOL: std::sync::Mutex<Option<(usize, Arc<rayon::ThreadPool>)>> =
+        std::sync::Mutex::new(None);
+    let parallelism = parallelism.max(1);
+    let mut guard = POOL
+        .lock()
+        .map_err(|_| AppError::Wallet("scan thread pool lock was poisoned".into()))?;
+    if let Some((size, pool)) = guard.as_ref() {
+        if *size == parallelism {
+            return Ok(Arc::clone(pool));
+        }
+    }
+    let pool = Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(parallelism)
+            .thread_name(|index| format!("zcash-scan-{index}"))
+            .build()
+            .map_err(|error| {
+                AppError::Wallet(format!("failed to build the scan thread pool: {error}"))
+            })?,
+    );
+    *guard = Some((parallelism, Arc::clone(&pool)));
+    Ok(pool)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SyncWakeStrategy {
@@ -824,8 +859,9 @@ async fn reconcile_overlap_batch(
     .await?;
     let network = config.network.clone();
     let scanning_keys = scanning_keys_from_uivk(&config.network, startup_uivk)?;
+    let pool = scan_thread_pool(config.scan_parallelism)?;
     let scanned_batch = task::spawn_blocking(move || {
-        scan_compact_blocks_for_wallet(&network, &scanning_keys, blocks)
+        scan_compact_blocks_for_wallet_in_pool(&network, &scanning_keys, blocks, &pool)
     })
     .await
     .map_err(join_error_to_wallet_error)??;
@@ -883,27 +919,45 @@ async fn scan_batches_with_pipeline(
     let startup_uivk = startup_uivk.to_string();
     let download_lightwalletd_url = lightwalletd_url.clone();
     let downloader: tokio::task::JoinHandle<Result<(), AppError>> = tokio::spawn(async move {
+        // Keep up to DOWNLOAD_CONCURRENCY range requests in flight, and hand
+        // results to the scanner strictly in height order.
+        let mut in_flight = std::collections::VecDeque::new();
         let mut next_batch = Some(first_batch);
-        while let Some(batch) = next_batch {
-            let result = fetch_compact_blocks_for_height_range(
-                &download_lightwalletd_url,
-                batch.start_height,
-                batch.end_height,
-            )
-            .await
-            .map(|blocks| DownloadedBatch { batch, blocks });
-
-            if sender.send(result).await.is_err() {
+        loop {
+            while in_flight.len() < DOWNLOAD_CONCURRENCY {
+                let Some(batch) = next_batch else { break };
+                let url = download_lightwalletd_url.clone();
+                in_flight.push_back(tokio::spawn(async move {
+                    fetch_compact_blocks_for_height_range(
+                        &url,
+                        batch.start_height,
+                        batch.end_height,
+                    )
+                    .await
+                    .map(|blocks| DownloadedBatch { batch, blocks })
+                }));
+                let following_start = batch.end_height.saturating_add(1);
+                next_batch = next_scan_batch(following_start, final_height, catch_up_batch_size);
+            }
+            let Some(handle) = in_flight.pop_front() else {
+                break;
+            };
+            let result = handle.await.map_err(join_error_to_wallet_error)?;
+            let failed = result.is_err();
+            if sender.send(result).await.is_err() || failed {
+                for handle in in_flight {
+                    handle.abort();
+                }
                 return Ok(());
             }
-
-            let following_start = batch.end_height.saturating_add(1);
-            next_batch = next_scan_batch(following_start, final_height, catch_up_batch_size);
         }
         Ok(())
     });
 
     let scanning_keys = Arc::new(scanning_keys_from_uivk(&config.network, &startup_uivk)?);
+    let pool = scan_thread_pool(config.scan_parallelism)?;
+    let mut scan_time = std::time::Duration::ZERO;
+    let mut download_wait_time = std::time::Duration::ZERO;
     let mut affected_address_ids = std::collections::BTreeSet::new();
     let mut last_scanned_height = 0i64;
     let total_blocks = final_height
@@ -914,18 +968,31 @@ async fn scan_batches_with_pipeline(
         .max(MIN_CATCH_UP_PROGRESS_LOG_INTERVAL_BLOCKS);
     let mut next_progress_log_at = progress_log_interval_blocks.min(total_blocks.max(1));
     let started_at = Instant::now();
-    while let Some(batch_result) = receiver.recv().await {
+    loop {
+        let wait_started = Instant::now();
+        let Some(batch_result) = receiver.recv().await else {
+            break;
+        };
+        download_wait_time += wait_started.elapsed();
         let downloaded = batch_result?;
         let app_db = app_db.clone();
         let network = config.network.clone();
         let batch_start_height = downloaded.batch.start_height;
         let batch_end_height = downloaded.batch.end_height;
         let scanning_keys = Arc::clone(&scanning_keys);
+        let batch_pool = Arc::clone(&pool);
+        let scan_started = Instant::now();
         let scanned_batch = task::spawn_blocking(move || {
-            scan_compact_blocks_for_wallet(&network, &*scanning_keys, downloaded.blocks)
+            scan_compact_blocks_for_wallet_in_pool(
+                &network,
+                &*scanning_keys,
+                downloaded.blocks,
+                &batch_pool,
+            )
         })
         .await
         .map_err(join_error_to_wallet_error)??;
+        scan_time += scan_started.elapsed();
         let observed_at = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)?;
 
@@ -982,6 +1049,11 @@ async fn scan_batches_with_pipeline(
                 remaining_blocks,
                 percent_complete,
                 elapsed_seconds = started_at.elapsed().as_secs(),
+                blocks_per_second = f64::from(completed_blocks)
+                    / started_at.elapsed().as_secs_f64().max(f64::EPSILON),
+                scan_seconds = scan_time.as_secs_f64(),
+                download_wait_seconds = download_wait_time.as_secs_f64(),
+                scan_parallelism = pool.current_num_threads(),
                 inserted_receipt_count = reconciliation.inserted_receipt_count,
                 revoked_receipt_count = reconciliation.revoked_receipt_count,
                 reactivated_receipt_count = reconciliation.reactivated_receipt_count,
@@ -1044,6 +1116,7 @@ mod tests {
             log_dir: temp.join("logs"),
             catch_up_threshold_blocks: 1,
             catch_up_batch_size: 100,
+            scan_parallelism: 2,
             sync_poll_interval_seconds: 5,
             webhook_url: None,
             webhook_secret: None,
