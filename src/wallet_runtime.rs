@@ -5,7 +5,8 @@ use crate::{
     receipt_ingest::attribute_scanned_receipts,
     scanner::{
         fetch_compact_blocks_for_height_range, fetch_current_mempool_txids,
-        fetch_raw_transactions_by_txids, latest_block_height, scan_compact_blocks_for_wallet,
+        fetch_raw_transactions_by_txids, latest_block_height,
+        scan_compact_blocks_for_wallet_in_pool,
         scan_incoming_mempool_receipts_from_raw_transactions, wait_for_block_mempool_stream,
     },
     wallet_db::initialize_wallet_db,
@@ -22,8 +23,42 @@ const STATE_SYNCED: &str = "synced";
 const STATE_CATCHING_UP: &str = "catching_up";
 const STATE_BLOCKED_SCANNING_KEY_MATERIAL: &str = "blocked_scanning_key_material";
 const STATE_BLOCKED_LIGHTWALLETD_ENDPOINT: &str = "blocked_lightwalletd_endpoint";
-const DOWNLOAD_PIPELINE_DEPTH: usize = 2;
+/// How many downloaded batches may wait for the scanner.
+const DOWNLOAD_PIPELINE_DEPTH: usize = 4;
+/// How many compact-block range requests may be in flight at once during
+/// catch-up. Batches are still handed to the scanner in height order.
+const DOWNLOAD_CONCURRENCY: usize = 3;
 const MIN_CATCH_UP_PROGRESS_LOG_INTERVAL_BLOCKS: u32 = 1_000;
+
+/// Returns the dedicated rayon pool for trial decryption, sized by
+/// `SCAN_PARALLELISM`. The pool is built once and reused; it is rebuilt only if
+/// a different size is requested (tests use several configs in one process).
+/// A dedicated pool keeps scanning off rayon's global pool, so other work in an
+/// embedding process is not starved and the cap is actually enforced.
+fn scan_thread_pool(parallelism: usize) -> Result<Arc<rayon::ThreadPool>, AppError> {
+    static POOL: std::sync::Mutex<Option<(usize, Arc<rayon::ThreadPool>)>> =
+        std::sync::Mutex::new(None);
+    let parallelism = parallelism.max(1);
+    let mut guard = POOL
+        .lock()
+        .map_err(|_| AppError::Wallet("scan thread pool lock was poisoned".into()))?;
+    if let Some((size, pool)) = guard.as_ref() {
+        if *size == parallelism {
+            return Ok(Arc::clone(pool));
+        }
+    }
+    let pool = Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(parallelism)
+            .thread_name(|index| format!("zcash-scan-{index}"))
+            .build()
+            .map_err(|error| {
+                AppError::Wallet(format!("failed to build the scan thread pool: {error}"))
+            })?,
+    );
+    *guard = Some((parallelism, Arc::clone(&pool)));
+    Ok(pool)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SyncWakeStrategy {
@@ -824,8 +859,9 @@ async fn reconcile_overlap_batch(
     .await?;
     let network = config.network.clone();
     let scanning_keys = scanning_keys_from_uivk(&config.network, startup_uivk)?;
+    let pool = scan_thread_pool(config.scan_parallelism)?;
     let scanned_batch = task::spawn_blocking(move || {
-        scan_compact_blocks_for_wallet(&network, &scanning_keys, blocks)
+        scan_compact_blocks_for_wallet_in_pool(&network, &scanning_keys, blocks, &pool)
     })
     .await
     .map_err(join_error_to_wallet_error)??;
@@ -866,6 +902,55 @@ fn next_scan_batch(
     })
 }
 
+/// Fetches every batch from `first_batch` through `final_height`, keeping up to
+/// `concurrency` fetches in flight, and sends the results in height order.
+/// Stops after the first failed fetch (which is sent) or when the receiver is
+/// dropped, aborting any fetches still in flight.
+async fn run_ordered_downloads<T, F, Fut>(
+    first_batch: ScanBatch,
+    final_height: u32,
+    catch_up_batch_size: u32,
+    concurrency: usize,
+    sender: mpsc::Sender<Result<T, AppError>>,
+    fetch: F,
+) -> Result<(), AppError>
+where
+    T: Send + 'static,
+    F: Fn(ScanBatch) -> Fut,
+    Fut: Future<Output = Result<T, AppError>> + Send + 'static,
+{
+    let mut in_flight = std::collections::VecDeque::new();
+    let mut next_batch = Some(first_batch);
+    let abort_all = |in_flight: std::collections::VecDeque<tokio::task::JoinHandle<_>>| {
+        for handle in in_flight {
+            handle.abort();
+        }
+    };
+    loop {
+        while in_flight.len() < concurrency.max(1) {
+            let Some(batch) = next_batch else { break };
+            in_flight.push_back(tokio::spawn(fetch(batch)));
+            let following_start = batch.end_height.saturating_add(1);
+            next_batch = next_scan_batch(following_start, final_height, catch_up_batch_size);
+        }
+        let Some(handle) = in_flight.pop_front() else {
+            return Ok(());
+        };
+        let result = match handle.await {
+            Ok(result) => result,
+            Err(error) => {
+                abort_all(in_flight);
+                return Err(join_error_to_wallet_error(error));
+            }
+        };
+        let failed = result.is_err();
+        if sender.send(result).await.is_err() || failed {
+            abort_all(in_flight);
+            return Ok(());
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn scan_batches_with_pipeline(
     config: &Config,
@@ -882,28 +967,31 @@ async fn scan_batches_with_pipeline(
     let lightwalletd_url = lightwalletd_url.to_string();
     let startup_uivk = startup_uivk.to_string();
     let download_lightwalletd_url = lightwalletd_url.clone();
-    let downloader: tokio::task::JoinHandle<Result<(), AppError>> = tokio::spawn(async move {
-        let mut next_batch = Some(first_batch);
-        while let Some(batch) = next_batch {
-            let result = fetch_compact_blocks_for_height_range(
-                &download_lightwalletd_url,
-                batch.start_height,
-                batch.end_height,
-            )
-            .await
-            .map(|blocks| DownloadedBatch { batch, blocks });
-
-            if sender.send(result).await.is_err() {
-                return Ok(());
-            }
-
-            let following_start = batch.end_height.saturating_add(1);
-            next_batch = next_scan_batch(following_start, final_height, catch_up_batch_size);
-        }
-        Ok(())
-    });
+    let downloader: tokio::task::JoinHandle<Result<(), AppError>> =
+        tokio::spawn(run_ordered_downloads(
+            first_batch,
+            final_height,
+            catch_up_batch_size,
+            DOWNLOAD_CONCURRENCY,
+            sender,
+            move |batch| {
+                let url = download_lightwalletd_url.clone();
+                async move {
+                    fetch_compact_blocks_for_height_range(
+                        &url,
+                        batch.start_height,
+                        batch.end_height,
+                    )
+                    .await
+                    .map(|blocks| DownloadedBatch { batch, blocks })
+                }
+            },
+        ));
 
     let scanning_keys = Arc::new(scanning_keys_from_uivk(&config.network, &startup_uivk)?);
+    let pool = scan_thread_pool(config.scan_parallelism)?;
+    let mut scan_time = std::time::Duration::ZERO;
+    let mut download_wait_time = std::time::Duration::ZERO;
     let mut affected_address_ids = std::collections::BTreeSet::new();
     let mut last_scanned_height = 0i64;
     let total_blocks = final_height
@@ -914,18 +1002,31 @@ async fn scan_batches_with_pipeline(
         .max(MIN_CATCH_UP_PROGRESS_LOG_INTERVAL_BLOCKS);
     let mut next_progress_log_at = progress_log_interval_blocks.min(total_blocks.max(1));
     let started_at = Instant::now();
-    while let Some(batch_result) = receiver.recv().await {
+    loop {
+        let wait_started = Instant::now();
+        let Some(batch_result) = receiver.recv().await else {
+            break;
+        };
+        download_wait_time += wait_started.elapsed();
         let downloaded = batch_result?;
         let app_db = app_db.clone();
         let network = config.network.clone();
         let batch_start_height = downloaded.batch.start_height;
         let batch_end_height = downloaded.batch.end_height;
         let scanning_keys = Arc::clone(&scanning_keys);
+        let batch_pool = Arc::clone(&pool);
+        let scan_started = Instant::now();
         let scanned_batch = task::spawn_blocking(move || {
-            scan_compact_blocks_for_wallet(&network, &*scanning_keys, downloaded.blocks)
+            scan_compact_blocks_for_wallet_in_pool(
+                &network,
+                &*scanning_keys,
+                downloaded.blocks,
+                &batch_pool,
+            )
         })
         .await
         .map_err(join_error_to_wallet_error)??;
+        scan_time += scan_started.elapsed();
         let observed_at = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)?;
 
@@ -982,6 +1083,11 @@ async fn scan_batches_with_pipeline(
                 remaining_blocks,
                 percent_complete,
                 elapsed_seconds = started_at.elapsed().as_secs(),
+                blocks_per_second = f64::from(completed_blocks)
+                    / started_at.elapsed().as_secs_f64().max(f64::EPSILON),
+                scan_seconds = scan_time.as_secs_f64(),
+                download_wait_seconds = download_wait_time.as_secs_f64(),
+                scan_parallelism = pool.current_num_threads(),
                 inserted_receipt_count = reconciliation.inserted_receipt_count,
                 revoked_receipt_count = reconciliation.revoked_receipt_count,
                 reactivated_receipt_count = reconciliation.reactivated_receipt_count,
@@ -1044,6 +1150,7 @@ mod tests {
             log_dir: temp.join("logs"),
             catch_up_threshold_blocks: 1,
             catch_up_batch_size: 100,
+            scan_parallelism: 2,
             sync_poll_interval_seconds: 5,
             webhook_url: None,
             webhook_secret: None,
@@ -2262,5 +2369,139 @@ mod tests {
                 },
             ]
         );
+    }
+
+    mod ordered_downloads {
+        use super::super::{run_ordered_downloads, ScanBatch};
+        use crate::error::AppError;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use std::time::Duration;
+        use tokio::sync::mpsc;
+
+        struct Counters {
+            started: AtomicUsize,
+            running: AtomicUsize,
+            max_running: AtomicUsize,
+            finished: AtomicUsize,
+        }
+
+        fn counters() -> Arc<Counters> {
+            Arc::new(Counters {
+                started: AtomicUsize::new(0),
+                running: AtomicUsize::new(0),
+                max_running: AtomicUsize::new(0),
+                finished: AtomicUsize::new(0),
+            })
+        }
+
+        /// A fetch where later batches finish sooner, so completion order is
+        /// the reverse of height order. `fail_at` makes that batch fail.
+        fn fetcher(
+            counters: Arc<Counters>,
+            fail_at: Option<u32>,
+            delay_ms: impl Fn(u32) -> u64 + Send + Sync + 'static,
+        ) -> impl Fn(
+            ScanBatch,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<u32, AppError>> + Send>,
+        > {
+            let delay_ms = Arc::new(delay_ms);
+            move |batch| {
+                let counters = Arc::clone(&counters);
+                let delay_ms = Arc::clone(&delay_ms);
+                Box::pin(async move {
+                    counters.started.fetch_add(1, Ordering::SeqCst);
+                    let running = counters.running.fetch_add(1, Ordering::SeqCst) + 1;
+                    counters.max_running.fetch_max(running, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(delay_ms(batch.start_height))).await;
+                    counters.running.fetch_sub(1, Ordering::SeqCst);
+                    counters.finished.fetch_add(1, Ordering::SeqCst);
+                    if Some(batch.start_height) == fail_at {
+                        Err(AppError::Wallet(format!(
+                            "fetch {} failed",
+                            batch.start_height
+                        )))
+                    } else {
+                        Ok(batch.start_height)
+                    }
+                })
+            }
+        }
+
+        fn first() -> ScanBatch {
+            ScanBatch {
+                start_height: 1,
+                end_height: 1,
+            }
+        }
+
+        #[tokio::test]
+        async fn delivers_in_height_order_with_bounded_concurrency() {
+            let counters = counters();
+            let (sender, mut receiver) = mpsc::channel(4);
+            let fetch = fetcher(Arc::clone(&counters), None, |height| {
+                5 * (12 - u64::from(height))
+            });
+            let downloader = tokio::spawn(run_ordered_downloads(first(), 10, 1, 3, sender, fetch));
+
+            let mut heights = Vec::new();
+            while let Some(result) = receiver.recv().await {
+                heights.push(result.unwrap());
+            }
+            downloader.await.unwrap().unwrap();
+
+            assert_eq!(heights, (1..=10).collect::<Vec<_>>());
+            assert_eq!(counters.max_running.load(Ordering::SeqCst), 3);
+        }
+
+        #[tokio::test]
+        async fn a_stalled_consumer_bounds_buffered_and_started_fetches() {
+            let counters = counters();
+            let (sender, mut receiver) = mpsc::channel(1);
+            let fetch = fetcher(Arc::clone(&counters), None, |_| 1);
+            let downloader = tokio::spawn(run_ordered_downloads(first(), 100, 1, 3, sender, fetch));
+
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            // One result fills the channel, the next waits in `send`, and the
+            // remaining in-flight slots are refilled once: 1 + 3 started.
+            assert_eq!(counters.started.load(Ordering::SeqCst), 4);
+
+            assert_eq!(receiver.recv().await.unwrap().unwrap(), 1);
+            drop(receiver);
+            downloader.await.unwrap().unwrap();
+            assert!(counters.started.load(Ordering::SeqCst) <= 6);
+        }
+
+        #[tokio::test]
+        async fn a_failed_fetch_is_sent_and_pending_fetches_are_cancelled() {
+            let counters = counters();
+            let (sender, mut receiver) = mpsc::channel(4);
+            let fetch = fetcher(Arc::clone(&counters), Some(2), |height| {
+                if height <= 2 {
+                    1
+                } else {
+                    10_000
+                }
+            });
+            let downloader = tokio::spawn(run_ordered_downloads(first(), 10, 1, 3, sender, fetch));
+
+            assert_eq!(receiver.recv().await.unwrap().unwrap(), 1);
+            let error = receiver.recv().await.unwrap().unwrap_err();
+            assert!(error.to_string().contains("fetch 2 failed"));
+            assert!(receiver.recv().await.is_none());
+            downloader.await.unwrap().unwrap();
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert_eq!(counters.finished.load(Ordering::SeqCst), 2);
+            // Fetches that were still running were aborted, not left to finish.
+            assert!(counters.started.load(Ordering::SeqCst) > 2);
+            assert_eq!(
+                counters.running.load(Ordering::SeqCst),
+                counters.started.load(Ordering::SeqCst) - 2
+            );
+        }
     }
 }

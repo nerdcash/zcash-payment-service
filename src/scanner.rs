@@ -20,7 +20,7 @@ use zcash_client_backend::{
             Empty, GetMempoolTxRequest, RawTransaction, TreeState, TxFilter,
         },
     },
-    scanning::{scan_block, Nullifiers, ScanningKeys},
+    scanning::{scan_block, ScanningKeys, SpendIdentifiers},
 };
 use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_primitives::transaction::Transaction;
@@ -589,6 +589,127 @@ pub fn scan_incoming_compact_blocks(
     Ok(aggregate_receipts_by_transaction(&receipts))
 }
 
+/// First mainnet height of the 2022–2023 "sandblasting" spam window, during
+/// which blocks were filled with transactions carrying very many shielded
+/// outputs. Matches the window Nerdbank.Cryptocurrencies uses.
+pub const MAINNET_SPAM_FILTER_START_HEIGHT: u32 = 1_710_000;
+/// Last mainnet height (inclusive) of the spam window.
+pub const MAINNET_SPAM_FILTER_END_HEIGHT: u32 = 2_050_000;
+/// Inside the spam window, a transaction with more shielded outputs than this
+/// (Sapling outputs + Orchard actions + Ironwood actions) is not trial-decrypted.
+pub const SPAM_FILTER_OUTPUT_THRESHOLD: usize = 50;
+
+fn compact_tx_shielded_outputs(
+    tx: &zcash_client_backend::proto::compact_formats::CompactTx,
+) -> usize {
+    tx.outputs.len() + tx.actions.len() + tx.ironwood_actions.len()
+}
+
+/// Drops spam transactions from a mainnet compact block in the sandblasting
+/// window so they are never trial-decrypted. Returns how many were dropped.
+///
+/// This service scans without note commitment trees or spend detection, so a
+/// dropped transaction only means its outputs are not checked for payments.
+/// A real payment hidden inside a transaction with more than
+/// [`SPAM_FILTER_OUTPUT_THRESHOLD`] shielded outputs in that window would be
+/// missed; that is the accepted tradeoff, and the window ended long ago.
+fn apply_spam_filter(
+    network: &zcash_protocol::consensus::Network,
+    block: &mut CompactBlock,
+) -> usize {
+    if *network != zcash_protocol::consensus::Network::MainNetwork {
+        return 0;
+    }
+    let in_window = u32::try_from(block.height)
+        .map(|height| {
+            (MAINNET_SPAM_FILTER_START_HEIGHT..=MAINNET_SPAM_FILTER_END_HEIGHT).contains(&height)
+        })
+        .unwrap_or(false);
+    if !in_window {
+        return 0;
+    }
+    let before = block.vtx.len();
+    block
+        .vtx
+        .retain(|tx| compact_tx_shielded_outputs(tx) <= SPAM_FILTER_OUTPUT_THRESHOLD);
+    before - block.vtx.len()
+}
+
+fn scan_one_compact_block<AccountId>(
+    network: &zcash_protocol::consensus::Network,
+    scanning_keys: &ScanningKeys<AccountId, (AccountId, Scope)>,
+    mut block: CompactBlock,
+) -> Result<(Vec<IncomingReceipt>, ScannedBlock<AccountId>), AppError>
+where
+    AccountId: Copy + Default + Eq + Hash + Send + Sync + subtle::ConditionallySelectable + 'static,
+{
+    let network = *network;
+    apply_spam_filter(&network, &mut block);
+    let mut receipts = Vec::new();
+    let scanned_block = scan_block::<_, _, _, std::convert::Infallible>(
+        &network,
+        block,
+        scanning_keys,
+        &SpendIdentifiers::empty(),
+        None,
+    )
+    .map_err(|error| AppError::Wallet(format!("failed to scan compact block: {error}")))?;
+
+    let mined_height = u32::from(scanned_block.height());
+    for tx in scanned_block.transactions() {
+        let txid_hex = tx.txid().to_string();
+
+        for output in tx.sapling_outputs() {
+            receipts.push(IncomingReceipt {
+                txid_hex: txid_hex.clone(),
+                mined_height,
+                is_mempool: false,
+                pool: "sapling".into(),
+                output_index: u16::try_from(output.index())
+                    .map_err(|_| AppError::Wallet("sapling output index overflowed u16".into()))?,
+                value_zat: output.note().value().inner(),
+                receiver_fingerprint: receiver_fingerprint(
+                    output.note().recipient().to_bytes().to_vec(),
+                ),
+            });
+        }
+
+        for output in tx.orchard_outputs() {
+            let (note, pool) = output.note();
+            receipts.push(IncomingReceipt {
+                txid_hex: txid_hex.clone(),
+                mined_height,
+                is_mempool: false,
+                pool: shielded_pool_name(*pool).into(),
+                output_index: u16::try_from(output.index())
+                    .map_err(|_| AppError::Wallet("orchard output index overflowed u16".into()))?,
+                value_zat: note.value().inner(),
+                receiver_fingerprint: receiver_fingerprint(
+                    note.recipient().to_raw_address_bytes().to_vec(),
+                ),
+            });
+        }
+
+        for output in tx.ironwood_outputs() {
+            let (note, pool) = output.note();
+            receipts.push(IncomingReceipt {
+                txid_hex: txid_hex.clone(),
+                mined_height,
+                is_mempool: false,
+                pool: shielded_pool_name(*pool).into(),
+                output_index: u16::try_from(output.index())
+                    .map_err(|_| AppError::Wallet("ironwood output index overflowed u16".into()))?,
+                value_zat: note.value().inner(),
+                receiver_fingerprint: receiver_fingerprint(
+                    note.recipient().to_raw_address_bytes().to_vec(),
+                ),
+            });
+        }
+    }
+
+    Ok((receipts, scanned_block))
+}
+
 fn scan_compact_blocks_with_scanning_keys<AccountId>(
     network_name: &str,
     scanning_keys: &ScanningKeys<AccountId, (AccountId, Scope)>,
@@ -597,69 +718,43 @@ fn scan_compact_blocks_with_scanning_keys<AccountId>(
 where
     AccountId: Copy + Default + Eq + Hash + Send + Sync + subtle::ConditionallySelectable + 'static,
 {
+    scan_compact_blocks_in_pool(network_name, scanning_keys, blocks, None)
+}
+
+/// Scans compact blocks, in parallel on `pool` when one is given. Blocks are
+/// scanned independently (no tree state or spend tracking carries between
+/// them), and results are collected in block order and then sorted, so the
+/// output is identical to a serial scan.
+fn scan_compact_blocks_in_pool<AccountId>(
+    network_name: &str,
+    scanning_keys: &ScanningKeys<AccountId, (AccountId, Scope)>,
+    blocks: impl IntoIterator<Item = CompactBlock>,
+    pool: Option<&rayon::ThreadPool>,
+) -> Result<ScannedCompactBlockBatch<AccountId>, AppError>
+where
+    AccountId: Copy + Default + Eq + Hash + Send + Sync + subtle::ConditionallySelectable + 'static,
+{
+    use rayon::prelude::*;
+
     let network = consensus_network(network_name)?;
+    let blocks = blocks.into_iter().collect::<Vec<_>>();
+    let per_block = match pool {
+        Some(pool) if pool.current_num_threads() > 1 && blocks.len() > 1 => pool.install(|| {
+            blocks
+                .into_par_iter()
+                .map(|block| scan_one_compact_block(&network, scanning_keys, block))
+                .collect::<Result<Vec<_>, _>>()
+        })?,
+        _ => blocks
+            .into_iter()
+            .map(|block| scan_one_compact_block(&network, scanning_keys, block))
+            .collect::<Result<Vec<_>, _>>()?,
+    };
+
     let mut receipts = Vec::new();
-    let mut scanned_blocks = Vec::new();
-
-    for block in blocks {
-        let scanned_block = scan_block(&network, block, scanning_keys, &Nullifiers::empty(), None)
-            .map_err(|error| AppError::Wallet(format!("failed to scan compact block: {error}")))?;
-
-        let mined_height = u32::from(scanned_block.height());
-        for tx in scanned_block.transactions() {
-            let txid_hex = tx.txid().to_string();
-
-            for output in tx.sapling_outputs() {
-                receipts.push(IncomingReceipt {
-                    txid_hex: txid_hex.clone(),
-                    mined_height,
-                    is_mempool: false,
-                    pool: "sapling".into(),
-                    output_index: u16::try_from(output.index()).map_err(|_| {
-                        AppError::Wallet("sapling output index overflowed u16".into())
-                    })?,
-                    value_zat: output.note().value().inner(),
-                    receiver_fingerprint: receiver_fingerprint(
-                        output.note().recipient().to_bytes().to_vec(),
-                    ),
-                });
-            }
-
-            for output in tx.orchard_outputs() {
-                let (note, pool) = output.note();
-                receipts.push(IncomingReceipt {
-                    txid_hex: txid_hex.clone(),
-                    mined_height,
-                    is_mempool: false,
-                    pool: shielded_pool_name(*pool).into(),
-                    output_index: u16::try_from(output.index()).map_err(|_| {
-                        AppError::Wallet("orchard output index overflowed u16".into())
-                    })?,
-                    value_zat: note.value().inner(),
-                    receiver_fingerprint: receiver_fingerprint(
-                        note.recipient().to_raw_address_bytes().to_vec(),
-                    ),
-                });
-            }
-
-            for output in tx.ironwood_outputs() {
-                let (note, pool) = output.note();
-                receipts.push(IncomingReceipt {
-                    txid_hex: txid_hex.clone(),
-                    mined_height,
-                    is_mempool: false,
-                    pool: shielded_pool_name(*pool).into(),
-                    output_index: u16::try_from(output.index()).map_err(|_| {
-                        AppError::Wallet("ironwood output index overflowed u16".into())
-                    })?,
-                    value_zat: note.value().inner(),
-                    receiver_fingerprint: receiver_fingerprint(
-                        note.recipient().to_raw_address_bytes().to_vec(),
-                    ),
-                });
-            }
-        }
-
+    let mut scanned_blocks = Vec::with_capacity(per_block.len());
+    for (block_receipts, scanned_block) in per_block {
+        receipts.extend(block_receipts);
         scanned_blocks.push(scanned_block);
     }
 
@@ -686,6 +781,19 @@ pub fn scan_incoming_receipts_from_compact_blocks(
     Ok(scan_compact_blocks_with_scanning_keys(network_name, &scanning_keys, blocks)?.receipts)
 }
 
+/// Like [`scan_compact_blocks_for_wallet`], but scans blocks in parallel on `pool`.
+pub fn scan_compact_blocks_for_wallet_in_pool<AccountId>(
+    network_name: &str,
+    scanning_keys: &ScanningKeys<AccountId, (AccountId, Scope)>,
+    blocks: impl IntoIterator<Item = CompactBlock>,
+    pool: &rayon::ThreadPool,
+) -> Result<ScannedCompactBlockBatch<AccountId>, AppError>
+where
+    AccountId: Copy + Default + Eq + Hash + Send + Sync + subtle::ConditionallySelectable + 'static,
+{
+    scan_compact_blocks_in_pool(network_name, scanning_keys, blocks, Some(pool))
+}
+
 pub fn scan_compact_blocks_for_wallet<AccountId>(
     network_name: &str,
     scanning_keys: &ScanningKeys<AccountId, (AccountId, Scope)>,
@@ -697,6 +805,34 @@ where
     scan_compact_blocks_with_scanning_keys(network_name, scanning_keys, blocks)
 }
 
+/// Parses raw mempool transactions under the consensus branch of the block
+/// after `chain_tip_height`, the block they target (this matters at upgrade
+/// boundaries such as NU7 activation). A transaction that fails to parse is
+/// logged and skipped, so it cannot hide other mempool payments; block
+/// scanning still finds it once mined.
+fn parse_mempool_transactions(
+    network: &zcash_protocol::consensus::Network,
+    chain_tip_height: BlockHeight,
+    transactions: impl IntoIterator<Item = RawTransaction>,
+) -> Vec<Transaction> {
+    let branch_id = BranchId::for_height(network, chain_tip_height + 1);
+    transactions
+        .into_iter()
+        .filter_map(|raw_transaction| {
+            match Transaction::read(&raw_transaction.data[..], branch_id) {
+                Ok(transaction) => Some(transaction),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "skipping mempool transaction that failed to parse"
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 pub fn scan_incoming_mempool_receipts_from_raw_transactions(
     network_name: &str,
     encoded_uivk: &str,
@@ -704,8 +840,8 @@ pub fn scan_incoming_mempool_receipts_from_raw_transactions(
     transactions: impl IntoIterator<Item = RawTransaction>,
 ) -> Result<Vec<IncomingReceipt>, AppError> {
     let network = consensus_network(network_name)?;
-    let uivk =
-        UnifiedIncomingViewingKey::decode(&network, encoded_uivk).map_err(AppError::Wallet)?;
+    let uivk = UnifiedIncomingViewingKey::decode(&network, encoded_uivk)
+        .map_err(|error| AppError::Wallet(error.to_string()))?;
     let chain_tip_height = BlockHeight::from_u32(chain_tip_height);
     let mut receipts = Vec::new();
 
@@ -717,14 +853,7 @@ pub fn scan_incoming_mempool_receipts_from_raw_transactions(
     let sapling_pivk = uivk.sapling().as_ref().map(|ivk| ivk.prepare());
     let orchard_pivk = uivk.orchard().as_ref().map(|ivk| ivk.prepare());
 
-    for raw_transaction in transactions {
-        let transaction = Transaction::read(
-            &raw_transaction.data[..],
-            BranchId::for_height(&network, chain_tip_height),
-        )
-        .map_err(|error| {
-            AppError::Wallet(format!("failed to parse mempool transaction: {error}"))
-        })?;
+    for transaction in parse_mempool_transactions(&network, chain_tip_height, transactions) {
         let txid_hex = transaction.txid().to_string();
 
         if let (Some(bundle), Some(pivk)) = (transaction.sapling_bundle(), sapling_pivk.as_ref()) {
@@ -904,12 +1033,19 @@ fn receiver_fingerprint(bytes: Vec<u8>) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_retryable_lightwalletd_error, with_request_timeout};
+    use super::{
+        apply_spam_filter, is_retryable_lightwalletd_error, scan_compact_blocks_for_wallet,
+        scan_compact_blocks_for_wallet_in_pool, with_request_timeout, IncomingReceipt,
+        ScannedCompactBlockBatch, MAINNET_SPAM_FILTER_END_HEIGHT, MAINNET_SPAM_FILTER_START_HEIGHT,
+        SPAM_FILTER_OUTPUT_THRESHOLD,
+    };
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     };
     use std::time::Duration;
+    use zcash_primitives::transaction::Transaction;
+    use zcash_protocol::consensus::{BlockHeight, BranchId};
 
     use tempfile::tempdir;
     use tonic::Status;
@@ -944,7 +1080,9 @@ mod tests {
         use zcash_keys::keys::UnifiedFullViewingKey;
         let network = super::consensus_network("testnet").unwrap();
         let ufvk = UnifiedFullViewingKey::decode(&network, TESTNET_UFVK_NO_TRANSPARENT).unwrap();
-        ufvk.to_unified_incoming_viewing_key().encode(&network)
+        ufvk.to_unified_incoming_viewing_key()
+            .encode(&network)
+            .expect("test UIVK encodes")
     }
 
     const TESTNET_VECTORS: &[(u32, &str, u64)] = &[
@@ -1094,7 +1232,7 @@ mod tests {
             nullifier: nf_old.to_bytes().to_vec(),
             cmx: cmx.to_bytes().to_vec(),
             ephemeral_key: ephemeral_key.0.to_vec(),
-            ciphertext: enc_ciphertext[..52].to_vec(),
+            ciphertext: enc_ciphertext.as_ref()[..52].to_vec(),
         };
 
         let txid = [0x11u8; 32];
@@ -1139,6 +1277,7 @@ mod tests {
             log_dir: temp.join("logs"),
             catch_up_threshold_blocks: 1,
             catch_up_batch_size: 100,
+            scan_parallelism: 2,
             sync_poll_interval_seconds: 5,
             webhook_url: None,
             webhook_secret: None,
@@ -1149,6 +1288,106 @@ mod tests {
             webhook_report_confirmations: 0,
             finality_confirmations: 100,
         }
+    }
+
+    /// The Ironwood payment fixture at `height`, padded with copies of its
+    /// action so the transaction has `actions` shielded outputs.
+    fn padded_payment_block(height: u64, actions: usize) -> CompactBlock {
+        let (mut block, _, _) = ironwood_compact_block_fixture(MAINNET_UIVK_NO_TRANSPARENT, 1_000);
+        block.height = height;
+        let tx = &mut block.vtx[0];
+        let action = tx.ironwood_actions[0].clone();
+        tx.actions.clear();
+        tx.ironwood_actions = vec![action; actions];
+        let metadata = block.chain_metadata.as_mut().unwrap();
+        metadata.orchard_commitment_tree_size = 0;
+        metadata.ironwood_commitment_tree_size = u32::try_from(actions).unwrap();
+        block
+    }
+
+    fn mainnet_receipts(blocks: Vec<CompactBlock>) -> Vec<IncomingReceipt> {
+        scan_incoming_receipts_from_compact_blocks("mainnet", MAINNET_UIVK_NO_TRANSPARENT, blocks)
+            .unwrap()
+    }
+
+    #[test]
+    fn spam_filter_skips_high_output_transactions_in_the_mainnet_window() {
+        let inside = u64::from(MAINNET_SPAM_FILTER_START_HEIGHT) + 100_000;
+        let over = SPAM_FILTER_OUTPUT_THRESHOLD + 1;
+        assert!(mainnet_receipts(vec![padded_payment_block(inside, over)]).is_empty());
+        assert!(mainnet_receipts(vec![padded_payment_block(
+            u64::from(MAINNET_SPAM_FILTER_START_HEIGHT),
+            over
+        )])
+        .is_empty());
+        assert!(mainnet_receipts(vec![padded_payment_block(
+            u64::from(MAINNET_SPAM_FILTER_END_HEIGHT),
+            over
+        )])
+        .is_empty());
+    }
+
+    #[test]
+    fn spam_filter_keeps_transactions_at_the_threshold_and_outside_the_window() {
+        let inside = u64::from(MAINNET_SPAM_FILTER_START_HEIGHT) + 100_000;
+        let at_threshold = mainnet_receipts(vec![padded_payment_block(
+            inside,
+            SPAM_FILTER_OUTPUT_THRESHOLD,
+        )]);
+        assert_eq!(at_threshold.len(), SPAM_FILTER_OUTPUT_THRESHOLD);
+
+        let over = SPAM_FILTER_OUTPUT_THRESHOLD + 1;
+        for height in [
+            u64::from(MAINNET_SPAM_FILTER_START_HEIGHT) - 1,
+            u64::from(MAINNET_SPAM_FILTER_END_HEIGHT) + 1,
+        ] {
+            assert_eq!(
+                mainnet_receipts(vec![padded_payment_block(height, over)]).len(),
+                over
+            );
+        }
+    }
+
+    #[test]
+    fn spam_filter_never_applies_off_mainnet() {
+        let mut block = padded_payment_block(
+            u64::from(MAINNET_SPAM_FILTER_START_HEIGHT) + 100_000,
+            SPAM_FILTER_OUTPUT_THRESHOLD + 1,
+        );
+        let removed =
+            apply_spam_filter(&zcash_protocol::consensus::Network::TestNetwork, &mut block);
+        assert_eq!(removed, 0);
+        assert_eq!(block.vtx.len(), 1);
+    }
+
+    #[test]
+    fn parallel_scan_matches_serial_scan() {
+        let blocks = (1..=12u64)
+            .map(|height| padded_payment_block(height, usize::try_from(height % 3 + 1).unwrap()))
+            .collect::<Vec<_>>();
+        let scanning_keys =
+            crate::zcash::scanning_keys_from_uivk("mainnet", MAINNET_UIVK_NO_TRANSPARENT).unwrap();
+        let serial =
+            scan_compact_blocks_for_wallet("mainnet", &scanning_keys, blocks.clone()).unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let parallel =
+            scan_compact_blocks_for_wallet_in_pool("mainnet", &scanning_keys, blocks, &pool)
+                .unwrap();
+
+        assert!(!serial.receipts.is_empty());
+        assert_eq!(parallel.receipts, serial.receipts);
+        let heights = |batch: &ScannedCompactBlockBatch<_>| {
+            batch
+                .scanned_blocks
+                .iter()
+                .map(|block| u32::from(block.height()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(heights(&parallel), heights(&serial));
+        assert_eq!(heights(&parallel), (1..=12).collect::<Vec<_>>());
     }
 
     #[test]
@@ -1229,24 +1468,6 @@ mod tests {
         .unwrap();
 
         assert!(receipts.is_empty());
-    }
-
-    #[test]
-    fn mempool_scan_rejects_invalid_raw_transaction_bytes() {
-        let error = scan_incoming_mempool_receipts_from_raw_transactions(
-            "mainnet",
-            MAINNET_UIVK_NO_TRANSPARENT,
-            1,
-            [RawTransaction {
-                data: vec![0xde, 0xad, 0xbe, 0xef],
-                height: 0,
-            }],
-        )
-        .unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("failed to parse mempool transaction"));
     }
 
     #[test]
@@ -1380,6 +1601,80 @@ mod tests {
 
         assert!(is_retryable_lightwalletd_error(&error));
         assert!(error.to_string().contains("timed out after 30s"));
+    }
+
+    /// A v6 transaction mined on testnet at height 4,559,069, after NU7
+    /// activation (consensus branch id 0x77190AD9).
+    const NU7_TESTNET_TX_HEX: &str = include_str!("testdata/nu7_testnet_tx.hex");
+    const NU7_TESTNET_TXID: &str =
+        "b18ffcf9dd324b2a1f7bd77ab8cd43d318130757965bb8aa1fb7e56684e701d4";
+
+    #[test]
+    fn nu7_transaction_parses_with_the_nu7_branch() {
+        let data = hex::decode(NU7_TESTNET_TX_HEX.trim()).unwrap();
+        let branch_id = BranchId::for_height(
+            &zcash_protocol::consensus::Network::TestNetwork,
+            BlockHeight::from_u32(4_559_069),
+        );
+        assert_eq!(u32::from(branch_id), 0x7719_0AD9);
+
+        let transaction = Transaction::read(&data[..], branch_id).unwrap();
+        assert_eq!(transaction.txid().to_string(), NU7_TESTNET_TXID);
+    }
+
+    #[test]
+    fn mempool_scan_accepts_nu7_transactions_at_the_tip() {
+        let data = hex::decode(NU7_TESTNET_TX_HEX.trim()).unwrap();
+        let receipts = scan_incoming_mempool_receipts_from_raw_transactions(
+            "testnet",
+            &testnet_uivk(),
+            4_559_068,
+            [RawTransaction { data, height: 0 }],
+        )
+        .unwrap();
+
+        // The fixture pays a different wallet; the point is that it parses.
+        assert!(receipts.is_empty());
+    }
+
+    #[test]
+    fn mempool_parse_keeps_valid_transactions_after_a_parse_failure() {
+        let malformed = || RawTransaction {
+            data: vec![0xde, 0xad, 0xbe, 0xef],
+            height: 0,
+        };
+        let nu7 = RawTransaction {
+            data: hex::decode(NU7_TESTNET_TX_HEX.trim()).unwrap(),
+            height: 0,
+        };
+
+        let parsed = super::parse_mempool_transactions(
+            &zcash_protocol::consensus::Network::TestNetwork,
+            BlockHeight::from_u32(4_559_068),
+            [malformed(), nu7, malformed()],
+        );
+
+        let txids = parsed
+            .iter()
+            .map(|transaction| transaction.txid().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(txids, vec![NU7_TESTNET_TXID.to_string()]);
+    }
+
+    #[test]
+    fn mempool_scan_skips_unparseable_transactions() {
+        let receipts = scan_incoming_mempool_receipts_from_raw_transactions(
+            "testnet",
+            &testnet_uivk(),
+            4_559_068,
+            [RawTransaction {
+                data: vec![0xde, 0xad, 0xbe, 0xef],
+                height: 0,
+            }],
+        )
+        .unwrap();
+
+        assert!(receipts.is_empty());
     }
 
     #[test]

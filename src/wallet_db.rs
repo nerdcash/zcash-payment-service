@@ -5,7 +5,7 @@ use std::{
     sync::{Mutex, MutexGuard, OnceLock},
 };
 
-use rand_core::OsRng;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use rusqlite::{Connection, Error as SqliteError, OptionalExtension};
 use zcash_client_backend::data_api::{wallet::ConfirmationsPolicy, WalletRead};
 use zcash_client_sqlite::{util::SystemClock, wallet::init::init_wallet_db, WalletDb};
@@ -25,8 +25,12 @@ pub struct WalletDbState {
     pub fully_scanned_height: Option<u32>,
 }
 
-type SqliteWalletDb =
-    WalletDb<rusqlite::Connection, zcash_protocol::consensus::Network, SystemClock, OsRng>;
+type SqliteWalletDb = WalletDb<
+    rusqlite::Connection,
+    zcash_protocol::consensus::Network,
+    SystemClock,
+    UnwrapErr<SysRng>,
+>;
 
 fn wallet_db_init_lock() -> Result<MutexGuard<'static, ()>, AppError> {
     static WALLET_DB_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -72,7 +76,7 @@ fn open_wallet_db(path: &Path, network_name: &str) -> Result<SqliteWalletDb, App
     }
 
     let network = consensus_network(network_name)?;
-    WalletDb::for_path(path, network, SystemClock, OsRng).map_err(AppError::Database)
+    WalletDb::for_path(path, network, SystemClock, UnwrapErr(SysRng)).map_err(AppError::Database)
 }
 
 fn open_migrated_wallet_db(path: &Path, network_name: &str) -> Result<SqliteWalletDb, AppError> {
@@ -177,6 +181,7 @@ mod tests {
             log_dir: temp.join("logs"),
             catch_up_threshold_blocks: 1,
             catch_up_batch_size: 100,
+            scan_parallelism: 2,
             sync_poll_interval_seconds: 5,
             webhook_url: None,
             webhook_secret: None,

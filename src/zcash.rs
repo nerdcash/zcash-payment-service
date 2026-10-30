@@ -1,7 +1,6 @@
 use zcash_client_backend::scanning::ScanningKeys;
 use zcash_keys::{
     address::UnifiedAddress,
-    encoding::AddressCodec,
     keys::{ReceiverRequirement, UnifiedAddressRequest, UnifiedIncomingViewingKey},
 };
 use zcash_protocol::consensus::Network;
@@ -30,8 +29,8 @@ pub struct WalletView {
 impl WalletView {
     pub fn decode(network_name: &str, encoded_uivk: &str) -> Result<Self, AppError> {
         let network = consensus_network(network_name)?;
-        let uivk =
-            UnifiedIncomingViewingKey::decode(&network, encoded_uivk).map_err(AppError::Wallet)?;
+        let uivk = UnifiedIncomingViewingKey::decode(&network, encoded_uivk)
+            .map_err(|error| AppError::Wallet(error.to_string()))?;
 
         if !uivk.has_orchard() || !uivk.has_sapling() {
             return Err(AppError::Wallet(
@@ -146,8 +145,8 @@ pub fn scanning_keys_from_uivk(
     use zcash_client_backend::scanning::ScanningKeyOps;
 
     let network = consensus_network(network_name)?;
-    let uivk =
-        UnifiedIncomingViewingKey::decode(&network, encoded_uivk).map_err(AppError::Wallet)?;
+    let uivk = UnifiedIncomingViewingKey::decode(&network, encoded_uivk)
+        .map_err(|error| AppError::Wallet(error.to_string()))?;
 
     if !uivk.has_orchard() || !uivk.has_sapling() {
         return Err(AppError::Wallet(
@@ -371,7 +370,9 @@ mod tests {
             let ufvk =
                 UnifiedFullViewingKey::decode(&network, TESTNET_UFVK_WITH_OPTIONAL_TRANSPARENT)
                     .unwrap();
-            ufvk.to_unified_incoming_viewing_key().encode(&network)
+            ufvk.to_unified_incoming_viewing_key()
+                .encode(&network)
+                .expect("test UIVK encodes")
         };
         let testnet_wallet = WalletView::decode("testnet", &testnet_uivk).unwrap();
         let testnet_address = testnet_wallet.derive_address_after(None).unwrap();
@@ -387,7 +388,9 @@ mod tests {
             let ufvk =
                 UnifiedFullViewingKey::decode(&network, TESTNET_UFVK_WITH_OPTIONAL_TRANSPARENT)
                     .unwrap();
-            ufvk.to_unified_incoming_viewing_key().encode(&network)
+            ufvk.to_unified_incoming_viewing_key()
+                .encode(&network)
+                .expect("test UIVK encodes")
         };
         let scanning_keys = super::scanning_keys_from_uivk("testnet", &encoded_uivk).unwrap();
         let wallet = WalletView::decode("testnet", &encoded_uivk).unwrap();

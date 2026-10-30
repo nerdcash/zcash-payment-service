@@ -124,3 +124,17 @@ services:
 `src/spec.md` describes the calling application as the owner of `ZCASH_PAYMENT_SERVICE_BASE_URL`. This binary does not read that variable. From another container on the same Compose network the base URL is `http://zcash-payment-service:8787`.
 
 Give the container the UIVK, the birthday height, and a lightwalletd URL, and keep the volume. The process has no request authentication, so publish the port on an address your application can reach and the public internet cannot.
+
+## Scan parallelism
+
+Catch-up scanning trial-decrypts every shielded output in each compact block. The service spreads blocks across a dedicated thread pool and downloads several block ranges ahead of the scanner. Receipts are still recorded in height order.
+
+`SCAN_PARALLELISM` sets the size of that pool. The default is the number of CPUs available to the process, which gives the fastest catch-up. The pool is separate from the Tokio runtime and from rayon's global pool, so the cap holds even when you embed the router in another application.
+
+Set a lower value when the same host also serves web pages or other latency-sensitive traffic. A long catch-up, such as a first sync from an old birthday height, can otherwise keep every core busy for minutes and slow page responses. For example, on a 4-core host that also runs a storefront, `SCAN_PARALLELISM=2` leaves room for the web server. `SCAN_PARALLELISM=1` scans one block at a time.
+
+Each catch-up progress log line reports `blocks_per_second`, `scan_seconds`, `download_wait_seconds`, and `scan_parallelism`. If `download_wait_seconds` dominates, more threads will not help; the lightwalletd server is the bottleneck.
+
+### Mainnet spam filter
+
+On mainnet, between heights 1,710,000 and 2,050,000, the scanner skips any transaction with more than 50 shielded outputs. That range covers the 2022 output-spam attack, and skipping those transactions greatly speeds a scan through it. The filter is built in and has no setting. A real payment in that window would need more than 50 outputs in one transaction to be missed. Testnet is never filtered.

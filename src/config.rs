@@ -25,6 +25,8 @@ pub struct Config {
     pub log_dir: PathBuf,
     pub catch_up_threshold_blocks: u32,
     pub catch_up_batch_size: u32,
+    /// Maximum number of threads used to trial-decrypt compact blocks.
+    pub scan_parallelism: usize,
     pub sync_poll_interval_seconds: u64,
     pub webhook_url: Option<String>,
     pub webhook_secret: Option<String>,
@@ -127,6 +129,11 @@ impl Config {
                 "CATCH_UP_BATCH_SIZE must be greater than zero".into(),
             ));
         }
+
+        let scan_parallelism = parse_scan_parallelism(
+            env::var("SCAN_PARALLELISM").ok().as_deref(),
+            default_scan_parallelism(),
+        )?;
 
         let sync_poll_interval_seconds = env::var("SYNC_POLL_INTERVAL_SECONDS")
             .ok()
@@ -248,6 +255,7 @@ impl Config {
             log_dir,
             catch_up_threshold_blocks,
             catch_up_batch_size,
+            scan_parallelism,
             sync_poll_interval_seconds,
             webhook_url,
             webhook_secret,
@@ -259,6 +267,28 @@ impl Config {
             finality_confirmations,
         })
     }
+}
+
+/// The default scan parallelism: every core the process may use.
+pub fn default_scan_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+}
+
+fn parse_scan_parallelism(value: Option<&str>, default: usize) -> Result<usize, AppError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let parsed = value.trim().parse::<usize>().map_err(|_| {
+        AppError::InvalidConfig("SCAN_PARALLELISM must be a positive integer".into())
+    })?;
+    if parsed == 0 {
+        return Err(AppError::InvalidConfig(
+            "SCAN_PARALLELISM must be greater than zero".into(),
+        ));
+    }
+    Ok(parsed)
 }
 
 fn validate_webhook_url(webhook_url: &str) -> Result<(), AppError> {
@@ -291,7 +321,32 @@ fn validate_webhook_url(webhook_url: &str) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_webhook_url;
+    use super::{parse_scan_parallelism, validate_webhook_url};
+
+    #[test]
+    fn scan_parallelism_defaults_when_unset() {
+        assert_eq!(parse_scan_parallelism(None, 6).unwrap(), 6);
+    }
+
+    #[test]
+    fn scan_parallelism_accepts_positive_integers() {
+        assert_eq!(parse_scan_parallelism(Some("1"), 6).unwrap(), 1);
+        assert_eq!(parse_scan_parallelism(Some(" 4 "), 6).unwrap(), 4);
+    }
+
+    #[test]
+    fn scan_parallelism_rejects_zero_negative_and_garbage() {
+        let zero = parse_scan_parallelism(Some("0"), 6).unwrap_err();
+        assert!(zero
+            .to_string()
+            .contains("SCAN_PARALLELISM must be greater than zero"));
+        for bad in ["-1", "two", "", "1.5"] {
+            let error = parse_scan_parallelism(Some(bad), 6).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("SCAN_PARALLELISM must be a positive integer"));
+        }
+    }
 
     #[test]
     fn webhook_url_accepts_absolute_http_url() {
