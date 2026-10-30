@@ -20,7 +20,7 @@ use zcash_client_backend::{
             Empty, GetMempoolTxRequest, RawTransaction, TreeState, TxFilter,
         },
     },
-    scanning::{scan_block, Nullifiers, ScanningKeys},
+    scanning::{scan_block, ScanningKeys, SpendIdentifiers},
 };
 use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_primitives::transaction::Transaction;
@@ -602,8 +602,14 @@ where
     let mut scanned_blocks = Vec::new();
 
     for block in blocks {
-        let scanned_block = scan_block(&network, block, scanning_keys, &Nullifiers::empty(), None)
-            .map_err(|error| AppError::Wallet(format!("failed to scan compact block: {error}")))?;
+        let scanned_block = scan_block::<_, _, _, std::convert::Infallible>(
+            &network,
+            block,
+            scanning_keys,
+            &SpendIdentifiers::empty(),
+            None,
+        )
+        .map_err(|error| AppError::Wallet(format!("failed to scan compact block: {error}")))?;
 
         let mined_height = u32::from(scanned_block.height());
         for tx in scanned_block.transactions() {
@@ -704,8 +710,8 @@ pub fn scan_incoming_mempool_receipts_from_raw_transactions(
     transactions: impl IntoIterator<Item = RawTransaction>,
 ) -> Result<Vec<IncomingReceipt>, AppError> {
     let network = consensus_network(network_name)?;
-    let uivk =
-        UnifiedIncomingViewingKey::decode(&network, encoded_uivk).map_err(AppError::Wallet)?;
+    let uivk = UnifiedIncomingViewingKey::decode(&network, encoded_uivk)
+        .map_err(|error| AppError::Wallet(error.to_string()))?;
     let chain_tip_height = BlockHeight::from_u32(chain_tip_height);
     let mut receipts = Vec::new();
 
@@ -717,14 +723,24 @@ pub fn scan_incoming_mempool_receipts_from_raw_transactions(
     let sapling_pivk = uivk.sapling().as_ref().map(|ivk| ivk.prepare());
     let orchard_pivk = uivk.orchard().as_ref().map(|ivk| ivk.prepare());
 
+    // Mempool transactions target the block after the current tip, so parse
+    // them under that height's consensus branch (this matters at upgrade
+    // boundaries such as NU7 activation).
+    let mempool_branch_id = BranchId::for_height(&network, chain_tip_height + 1);
+
     for raw_transaction in transactions {
-        let transaction = Transaction::read(
-            &raw_transaction.data[..],
-            BranchId::for_height(&network, chain_tip_height),
-        )
-        .map_err(|error| {
-            AppError::Wallet(format!("failed to parse mempool transaction: {error}"))
-        })?;
+        // One transaction this build cannot parse must not hide every other
+        // mempool payment, so skip it and let block scanning find it later.
+        let transaction = match Transaction::read(&raw_transaction.data[..], mempool_branch_id) {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "skipping mempool transaction that failed to parse"
+                );
+                continue;
+            }
+        };
         let txid_hex = transaction.txid().to_string();
 
         if let (Some(bundle), Some(pivk)) = (transaction.sapling_bundle(), sapling_pivk.as_ref()) {
@@ -910,6 +926,8 @@ mod tests {
         Arc,
     };
     use std::time::Duration;
+    use zcash_primitives::transaction::Transaction;
+    use zcash_protocol::consensus::{BlockHeight, BranchId};
 
     use tempfile::tempdir;
     use tonic::Status;
@@ -944,7 +962,9 @@ mod tests {
         use zcash_keys::keys::UnifiedFullViewingKey;
         let network = super::consensus_network("testnet").unwrap();
         let ufvk = UnifiedFullViewingKey::decode(&network, TESTNET_UFVK_NO_TRANSPARENT).unwrap();
-        ufvk.to_unified_incoming_viewing_key().encode(&network)
+        ufvk.to_unified_incoming_viewing_key()
+            .encode(&network)
+            .expect("test UIVK encodes")
     }
 
     const TESTNET_VECTORS: &[(u32, &str, u64)] = &[
@@ -1094,7 +1114,7 @@ mod tests {
             nullifier: nf_old.to_bytes().to_vec(),
             cmx: cmx.to_bytes().to_vec(),
             ephemeral_key: ephemeral_key.0.to_vec(),
-            ciphertext: enc_ciphertext[..52].to_vec(),
+            ciphertext: enc_ciphertext.as_ref()[..52].to_vec(),
         };
 
         let txid = [0x11u8; 32];
@@ -1232,24 +1252,6 @@ mod tests {
     }
 
     #[test]
-    fn mempool_scan_rejects_invalid_raw_transaction_bytes() {
-        let error = scan_incoming_mempool_receipts_from_raw_transactions(
-            "mainnet",
-            MAINNET_UIVK_NO_TRANSPARENT,
-            1,
-            [RawTransaction {
-                data: vec![0xde, 0xad, 0xbe, 0xef],
-                height: 0,
-            }],
-        )
-        .unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("failed to parse mempool transaction"));
-    }
-
-    #[test]
     fn missing_mempool_transaction_status_is_treated_as_benign() {
         let status = Status::unknown(
             "GetTransaction: getrawtransaction deadbeef failed: -5: No such mempool or main chain transaction",
@@ -1380,6 +1382,56 @@ mod tests {
 
         assert!(is_retryable_lightwalletd_error(&error));
         assert!(error.to_string().contains("timed out after 30s"));
+    }
+
+    /// A v6 transaction mined on testnet at height 4,559,069, after NU7
+    /// activation (consensus branch id 0x77190AD9).
+    const NU7_TESTNET_TX_HEX: &str = include_str!("testdata/nu7_testnet_tx.hex");
+    const NU7_TESTNET_TXID: &str =
+        "b18ffcf9dd324b2a1f7bd77ab8cd43d318130757965bb8aa1fb7e56684e701d4";
+
+    #[test]
+    fn nu7_transaction_parses_with_the_nu7_branch() {
+        let data = hex::decode(NU7_TESTNET_TX_HEX.trim()).unwrap();
+        let branch_id = BranchId::for_height(
+            &zcash_protocol::consensus::Network::TestNetwork,
+            BlockHeight::from_u32(4_559_069),
+        );
+        assert_eq!(u32::from(branch_id), 0x7719_0AD9);
+
+        let transaction = Transaction::read(&data[..], branch_id).unwrap();
+        assert_eq!(transaction.txid().to_string(), NU7_TESTNET_TXID);
+    }
+
+    #[test]
+    fn mempool_scan_accepts_nu7_transactions_at_the_tip() {
+        let data = hex::decode(NU7_TESTNET_TX_HEX.trim()).unwrap();
+        let receipts = scan_incoming_mempool_receipts_from_raw_transactions(
+            "testnet",
+            &testnet_uivk(),
+            4_559_068,
+            [RawTransaction { data, height: 0 }],
+        )
+        .unwrap();
+
+        // The fixture pays a different wallet; the point is that it parses.
+        assert!(receipts.is_empty());
+    }
+
+    #[test]
+    fn mempool_scan_skips_unparseable_transactions() {
+        let receipts = scan_incoming_mempool_receipts_from_raw_transactions(
+            "testnet",
+            &testnet_uivk(),
+            4_559_068,
+            [RawTransaction {
+                data: vec![0xde, 0xad, 0xbe, 0xef],
+                height: 0,
+            }],
+        )
+        .unwrap();
+
+        assert!(receipts.is_empty());
     }
 
     #[test]
