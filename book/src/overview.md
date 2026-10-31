@@ -29,6 +29,7 @@ The current code does all of the following:
 - Derives a new unified address from the canonical UIVK for every payment session. Each address has Orchard and Sapling receivers. An Ironwood receiver is recorded too, using the same receiver bytes as Orchard, so Ironwood notes can be attributed after NU6.3.
 - Scans compact blocks, and the mempool when `WEBHOOK_REPORT_CONFIRMATIONS` is `0`.
 - Rescans a recent window so a short reorg can correct a total, and advances receipt maturity as the chain tip moves.
+- Falls back to polling when the lightwalletd mempool stream is unavailable.
 - Signs outbound webhooks with HMAC-SHA256 and retries them with a capped exponential backoff.
 - Writes a daily JSON log file plus a compact log on standard output.
 
