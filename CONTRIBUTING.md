@@ -22,15 +22,14 @@ or `clients/**` changed, so those merges don't publish a new image.
 ## Keeping client and server in sync
 
 The service's wire contract is the source of truth. It is defined in `src/` and described in
-`src/spec.md`, `book/src/api.md`, and the README's "HTTP API summary" and "Webhook contract
-summary". A change to any of the following **must** be reflected in every place listed:
+`src/spec.md` and `book/src/api.md`. A change to any of the following **must** be reflected in every place listed:
 
 | If you change… | Also update |
 | --- | --- |
-| `POST /payment-session` request or response fields | `clients/node/src/index.ts` (types and validation), `clients/node/test/`, `clients/node/README.md`, `book/src/api.md`, `src/spec.md`, the README API summary |
-| Webhook payload fields, `payment_source` values, or field limits | `clients/node/src/index.ts` (`PaymentObservation`, `parseObservation`), client tests, `book/src/integration.md`, `book/src/api.md`, `src/spec.md`, the README webhook summary |
+| `POST /payment-session` request or response fields | `clients/node/src/index.ts` (types and validation), `clients/node/test/`, `clients/node/README.md`, `book/src/api.md`, `src/spec.md` |
+| Webhook payload fields, `payment_source` values, or field limits | `clients/node/src/index.ts` (`PaymentObservation`, `parseObservation`), client tests, `book/src/integration.md`, `book/src/api.md`, `src/spec.md` |
 | Webhook signing (algorithm, header name, encoding, what bytes are signed) | `verifyWebhook` in the Node client and its tests, plus every doc above. This is a breaking change for every store, so call it out in the PR and bump the client's major version (or minor while it is 0.x) |
-| Configuration or environment variables | README "Key configuration", `book/src/deployment.md`, `docker-compose.yml` |
+| Configuration or environment variables | `book/src/api.md` (Configuration), `book/src/deployment.md`, `docker-compose.yml` |
 | Error responses (status codes, `{ "error": ... }` shape) | The client's `PaymentServiceError` mapping and its tests |
 
 Prefer additive changes: new optional fields that old clients ignore. When a change is not
@@ -53,15 +52,29 @@ backward compatible, say so in the PR description and describe how deployed stor
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+cargo build --release
+docker compose config   # validate the Compose file
 ```
+
+Run the service locally with `cargo run` or `docker compose up --build`
+(see [Getting started](https://nerdcash.github.io/zcash-payment-service/getting-started.html)).
+
+The live testnet scanner-vector test is opt-in because it depends on an external lightwalletd server:
+
+```sh
+ZCASH_TESTNET_LIGHTWALLETD_URL=https://testnet.lightwalletd.com:9067 \
+  cargo test scanner::tests::live_testnet_vectors_are_detected_with_expected_amounts -- --ignored --exact
+```
+
+In PowerShell, set `$env:ZCASH_TESTNET_LIGHTWALLETD_URL` first, then run the same `cargo test` command.
 
 If the change touches the HTTP or webhook contract, follow the table above in the same PR.
 
 ## Changing the docs
 
 - `book/` builds with mdBook. Check it locally with `mdbook build book` before pushing.
-- Keep the guide, README summaries, and `src/spec.md` consistent. If they disagree, the code wins:
-  fix the docs.
+- Keep the guide and `src/spec.md` consistent. If they disagree, the code wins: fix the docs.
+- The README stays a short pitch that links into the guide. Put details in `book/`.
 
 ## Pull requests
 
