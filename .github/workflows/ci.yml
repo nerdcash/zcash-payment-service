@@ -3,6 +3,16 @@ name: CI
 on:
   push:
     branches: [main]
+    # Skip the build and image push when a merge only touches docs or the npm client.
+    # pull_request stays unfiltered so the required CI check always reports.
+    paths-ignore:
+      - "**/*.md"
+      - "book/**"
+      - "docs/**"
+      - "clients/**"
+      - ".github/workflows/node-client.yml"
+      - ".github/workflows/publish-node-client.yml"
+      - ".github/workflows/pages.yml"
   pull_request:
     branches: [main]
   workflow_dispatch:

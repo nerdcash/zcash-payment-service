@@ -1,0 +1,51 @@
+{
+  "name": "@nerdcash/zcash-payment-client",
+  "version": "0.1.0",
+  "description": "Node.js client for zcash-payment-service: create payment sessions and verify signed payment webhooks.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nerdcash/zcash-payment-service.git",
+    "directory": "clients/node"
+  },
+  "homepage": "https://github.com/nerdcash/zcash-payment-service/tree/main/clients/node#readme",
+  "bugs": "https://github.com/nerdcash/zcash-payment-service/issues",
+  "keywords": [
+    "zcash",
+    "payments",
+    "webhook",
+    "zec"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
+  }
+}
