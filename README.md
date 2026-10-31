@@ -6,7 +6,7 @@ Accept Zcash in your app with a **free, self-hosted** service that only ever hol
 - **Self-hosted:** run it as a small Docker container or embed the Rust crate in your own process.
 - **Viewing-key only:** give it a unified incoming viewing key (UIVK). It hands out a fresh shielded address per checkout and sends your app a signed webhook when funds arrive. It can see payments, but it can never spend them.
 
-[![Watch the demo](https://img.youtube.com/vi/OIlkqLVTn0w/maxresdefault.jpg)](https://www.youtube.com/watch?v=OIlkqLVTn0w)
+[![Watch the demo](docs/assets/demo-video-thumbnail.jpg)](https://www.youtube.com/watch?v=OIlkqLVTn0w)
 
 ## Quick start
 
