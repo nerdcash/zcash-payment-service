@@ -28,7 +28,7 @@ import {
 } from "@nerdcash/zcash-payment-client";
 
 const payments = createZcashPaymentClient({
-  baseUrl: process.env.ZCASH_PAYMENT_SERVICE_URL!, // e.g. http://zcash-payment-service:8080
+  baseUrl: process.env.ZCASH_PAYMENT_SERVICE_BASE_URL!, // e.g. http://zcash-payment-service:8787
   webhookSecret: process.env.ZCASH_WEBHOOK_SECRET!, // same secret the service signs with
 });
 

@@ -20,7 +20,7 @@ npm install @nerdcash/zcash-payment-client
 import { createZcashPaymentClient } from "@nerdcash/zcash-payment-client";
 
 const payments = createZcashPaymentClient({
-  baseUrl: process.env.ZCASH_PAYMENT_SERVICE_URL!, // e.g. http://zcash-payment-service:8080
+  baseUrl: process.env.ZCASH_PAYMENT_SERVICE_BASE_URL!, // e.g. http://zcash-payment-service:8787
   webhookSecret: process.env.ZCASH_WEBHOOK_SECRET!, // the same secret the service signs with
   // timeoutMs: 10_000,  // optional, for POST /payment-session
   // fetchImpl: fetch,   // optional, for tests or proxies
@@ -62,13 +62,16 @@ const svg = await QRCode.toString(session.qr_text, { type: "svg" });
 2. It validates the payload.
 3. It returns the observation: `event_id`, `payment_source`, `address`, `total_received`, and `observed_at`.
 
-Pass it the **raw** body bytes, not re-serialized JSON.
+Pass it the **raw** body bytes, not re-serialized JSON. In Express, give this route its own
+`express.raw()` parser and register it **before** any app-wide `express.json()` (or exclude the route
+from global body parsers). If a JSON parser runs first, `req.body` is an object and every delivery
+fails verification.
 
 ```ts
 import express from "express";
 import { WebhookPayloadError, WebhookSignatureError } from "@nerdcash/zcash-payment-client";
 
-app.post("/webhooks/zcash-payments", express.raw({ type: "application/json" }), (req, res) => {
+app.post("/webhooks/zcash-payments", express.raw({ type: "application/json" }), async (req, res) => {
   let observation;
   try {
     observation = payments.verifyWebhook(req.body, req.get("x-signature"));
@@ -78,10 +81,19 @@ app.post("/webhooks/zcash-payments", express.raw({ type: "application/json" }), 
     throw error;
   }
 
-  // Apply only newer state: event_id is zcash:<address_id>:v<state_version>.
+  // event_id is zcash:<address_id>:v<state_version>.
   const stateVersion = Number(observation.event_id.split(":v").pop());
-  // ...ignore it if stateVersion <= the last version stored for observation.address,
-  // otherwise store total_received and update the invoice.
+
+  // In ONE database transaction:
+  //   1. read the last state_version stored for observation.address (lock the row);
+  //   2. if stateVersion <= that value, change nothing;
+  //   3. otherwise store stateVersion, event_id, and total_received for the address,
+  //      and update the invoice.
+  // Doing the compare and the writes atomically keeps a retried or overlapping
+  // older delivery from overwriting newer state.
+  await applyObservationAtomically( // your own persistence code
+    observation.address, stateVersion, observation);
+
   res.status(200).end();
 });
 ```
