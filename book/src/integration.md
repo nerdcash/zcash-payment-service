@@ -12,6 +12,8 @@ Your application:
 
 The service stores the requested amount, memo, message, and label beside the address. It does not compare the amount it observes with the amount you requested. `total_received` is the cumulative eligible incoming total for that one address, in ZEC. It is not a wallet balance.
 
+On Node.js, the [Node.js client](node-client.md) (`@nerdcash/zcash-payment-client`) creates payment sessions and verifies webhook signatures for you. The rest of this page describes the wire contract it implements, for other languages.
+
 The router does not authenticate callers. Keep `POST /payment-session` on a network only your application can reach.
 
 ## Creating a payment request
@@ -49,7 +51,7 @@ Other request failures are described in the [API reference](api.md#http).
 
 ## Showing the address and the QR code
 
-Show `address` as the pay-to string. Render `qr_text` as a QR image in your application. The service returns the text. It does not return a PNG.
+Show `address` as the pay-to string. Render `qr_text` as a QR image in your application. The service returns the text. It does not return a PNG. On Node.js or in the browser, the [`qrcode`](https://www.npmjs.com/package/qrcode) package can render it. See [Node.js client](node-client.md#show-the-address-and-qr-code).
 
 `build_qr_text` builds that string:
 
@@ -115,6 +117,8 @@ The worker sets:
 
 The HMAC key is the UTF-8 bytes of `ZCASH_WEBHOOK_SECRET`. The message is the raw body bytes, before you parse JSON. Compare the hex digest to `X-Signature` in constant time.
 
+On Node.js, `verifyWebhook` in the [Node.js client](node-client.md#verify-a-webhook) does this check for you.
+
 This is the same construction as `sign_body` in `src/webhook_delivery.rs`:
 
 ```rust,ignore
@@ -142,6 +146,8 @@ The delay after a retryable failure is `WEBHOOK_RETRY_DELAY_SECONDS` (default `3
 `run()` also repairs a restart. Deliveries left in `sending` move back to `retry_wait` with `next_attempt_at` set to now, and addresses still marked `dirty` are queued again. That recovery function is private. The binary calls it. An embedder who builds the router by hand and does not call `run()` skips it. See [Deployment](deployment.md#rust-crate).
 
 ### A minimal handler
+
+On Node.js, `verifyWebhook` in the [Node.js client](node-client.md#verify-a-webhook) covers steps 1 to 3.
 
 1. Read the raw body.
 2. Recompute the HMAC and compare it to `X-Signature`.
