@@ -41,4 +41,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the repo layout, development commands
 
 ## License
 
-The Node.js client in [`clients/node`](clients/node) is [MIT licensed](clients/node/LICENSE).
+[MIT](LICENSE). This covers the whole repository, including the Node.js client.
