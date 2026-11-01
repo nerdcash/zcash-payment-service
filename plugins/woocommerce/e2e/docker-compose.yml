@@ -4,7 +4,7 @@ name: zcash-woocommerce-e2e
 
 services:
   db:
-    image: mysql:8.4@sha256:a0225d1ea6631c8bc2385dc4c2faba17bbf1834ecf369e1659a9a382bd8d5dd7
+    image: mysql:26.10@sha256:7b16ec7caa94ca7e92f4c5ec287de69d2e8738db056ceb629022951a6f6d910b
     environment:
       MYSQL_DATABASE: wordpress
       MYSQL_USER: wordpress
