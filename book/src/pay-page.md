@@ -64,7 +64,8 @@ Every session gets a payment id, whether or not you use the page. The existing `
 | `address`, `qr_text`, `pay_url` | As returned when the session was created. |
 | `label`, `message`, `amount` | The values the session was created with, or `null`. |
 | `total_received` | The address's eligible total in ZEC, the same number the webhook carries. |
-| `state_version` | Increments each time `total_received` changes. |
+| `received_by_confirmations` | Only when `REQUIRED_CONFIRMATIONS` is set. The same array the webhook carries: element `i` is the total with at least `i` confirmations. See [the integration guide](integration.md#waiting-for-confirmations). |
+| `state_version` | Increments each time `total_received` or `received_by_confirmations` changes. |
 | `status` | `awaiting_payment`, `partially_paid`, `paid`, or `received`. |
 | `return_url` | The session's `return_url`, or `null`. |
 | `created_at` | RFC 3339 UTC time the link was created. |

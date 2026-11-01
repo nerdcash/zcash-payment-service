@@ -95,6 +95,7 @@ The body is compact JSON produced by `serde_json::to_string`. The signed bytes a
 | `address` | The unified address from `POST /payment-session`. |
 | `total_received` | Eligible total in ZEC. Zatoshis divided by `100_000_000`, always with 8 fractional digits (`1.00000000`, `0.00000001`). |
 | `observed_at` | RFC 3339 UTC timestamp taken when the delivery row was queued. |
+| `received_by_confirmations` | Present only when the service sets `REQUIRED_CONFIRMATIONS`. See [Waiting for confirmations](#waiting-for-confirmations). |
 
 ### What counts toward the total
 
@@ -107,6 +108,25 @@ The body is compact JSON produced by `serde_json::to_string`. The signed bytes a
 `total_received` can go up or down. A reorg or an expired mempool note lowers it and still gets a higher `state_version`.
 
 Apply a webhook only when its `state_version` is greater than the last version you stored for that address. `claim_ready_webhook_delivery` claims the oldest row that is `queued`, or `retry_wait` whose `next_attempt_at` has arrived. A newer `queued` delivery can succeed while an older one is still waiting to retry, and that older `event_id` can arrive later. Return 2xx for the stale event and leave the invoice unchanged, so the service stops retrying it. The same `event_id` is also safe to acknowledge again.
+
+### Waiting for confirmations
+
+Set `REQUIRED_CONFIRMATIONS=N` on the service (it needs `WEBHOOK_REPORT_CONFIRMATIONS=0`) and every webhook, and `GET /payments/{payment_id}`, also carries `received_by_confirmations`: an array of N+1 amounts in the same format as `total_received`. Element `i` is the total received with at least `i` confirmations. Element 0 includes unconfirmed mempool receipts and always equals `total_received`.
+
+For N=3 and a 0.1 ZEC payment, successive webhooks carry:
+
+```json
+"received_by_confirmations":["0.10000000","0.00000000","0.00000000","0.00000000"]
+"received_by_confirmations":["0.10000000","0.10000000","0.00000000","0.00000000"]
+"received_by_confirmations":["0.10000000","0.10000000","0.10000000","0.00000000"]
+"received_by_confirmations":["0.10000000","0.10000000","0.10000000","0.10000000"]
+```
+
+An address with nothing received reports N+1 zeros. Each new block that deepens a receipt sends an event, with a new `state_version`. Once every element equals element 0, events stop until something changes again: new funds, a reorg, or a mempool note expiring. A reorg or expiry lowers exactly the elements it affects, so elements can go down as well as up. The same "apply only a higher `state_version`" rule applies.
+
+A typical store treats the order as *payment received, pending confirmation* when element 0 covers the price, and fulfils it only when element N does. When the field is absent (an older service, or the setting is off), fall back to `total_received`.
+
+Changing `REQUIRED_CONFIRMATIONS` between starts is allowed. Arrays are rebuilt silently from stored receipts, and the next event for each address uses the new length.
 
 ### Checking the signature
 
@@ -154,5 +174,5 @@ On Node.js, `verifyWebhook` in the [Node.js client](node-client.md#verify-a-webh
 3. Parse the JSON.
 4. Read `state_version` from `event_id` (`zcash:<address_id>:v<state_version>`).
 5. If this `event_id` is already applied, or its `state_version` is less than or equal to the last version stored for `address`, return 2xx and leave the invoice unchanged.
-6. Otherwise store `total_received` as the cumulative total for that address and update the invoice. Compare the version, because a newer total can be smaller.
+6. Otherwise store `total_received` (and `received_by_confirmations`, if present) as the cumulative totals for that address and update the invoice. Compare the version, because a newer total can be smaller.
 7. Return a 2xx status. Any other success-range status counts. `4xx` other than `429` will not be retried.

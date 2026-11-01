@@ -6,6 +6,7 @@ It has no runtime dependencies beyond Node's built-in `node:crypto`.
 - `createPaymentSession` asks the service for a fresh unified address and the `zcash:` URI to show as a QR code.
 - `getPayment` reads a payment link's status (`awaiting_payment`, `partially_paid`, `paid`, or `received`) for display.
 - `verifyWebhook` checks the HMAC-SHA256 `X-Signature` on a payment observation the service posts to your store, then validates and returns the payload.
+- `receivedWithConfirmations(payment, n)` reads the amount with at least `n` confirmations from `received_by_confirmations` (sent when the service sets `REQUIRED_CONFIRMATIONS`), falling back to `total_received`; it throws a `RangeError` for a depth past what the service tracks.
 
 Your store still owns prices, orders, and the decision of when an order counts as paid.
 

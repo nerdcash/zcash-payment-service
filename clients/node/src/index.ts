@@ -41,6 +41,11 @@ export type PaymentStatus = {
   message: string | null;
   amount: string | null;
   total_received: string;
+  /**
+   * Present when the service sets `REQUIRED_CONFIRMATIONS=N`: N+1 ZEC amounts, where index `i`
+   * is the total received with at least `i` confirmations (index 0 includes the mempool).
+   */
+  received_by_confirmations?: string[];
   state_version: number;
   status: PaymentStatusValue;
   return_url: string | null;
@@ -55,7 +60,46 @@ export type PaymentObservation = {
   address: string;
   total_received: string;
   observed_at: string;
+  /** See {@link PaymentStatus.received_by_confirmations}. */
+  received_by_confirmations?: string[];
 };
+
+const MAX_CONFIRMATION_DEPTHS = 101;
+
+/** Reads an optional `received_by_confirmations`; `null` means present but malformed. */
+function optionalAmounts(value: unknown): string[] | undefined | null {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) || value.length === 0 || value.length > MAX_CONFIRMATION_DEPTHS ||
+    !value.every((item) => typeof item === "string" && item.trim() !== "" && item.length <= 64)
+  ) {
+    return null;
+  }
+  return value as string[];
+}
+
+/**
+ * The amount received with at least `confirmations` confirmations, or `total_received` when the
+ * service does not report `received_by_confirmations`. Throws a `RangeError` for a depth that
+ * isn't a non-negative integer or that the service doesn't track (past the end of the array),
+ * rather than substituting a shallower total.
+ */
+export function receivedWithConfirmations(
+  payment: { total_received: string; received_by_confirmations?: string[] },
+  confirmations: number,
+): string {
+  if (!Number.isSafeInteger(confirmations) || confirmations < 0) {
+    throw new RangeError(`confirmations must be a non-negative integer, got ${confirmations}`);
+  }
+  const depths = payment.received_by_confirmations;
+  if (depths === undefined) return payment.total_received;
+  if (confirmations >= depths.length) {
+    throw new RangeError(
+      `the service tracks up to ${depths.length - 1} confirmations (REQUIRED_CONFIRMATIONS), not ${confirmations}`,
+    );
+  }
+  return depths[confirmations];
+}
 
 export class PaymentServiceError extends Error {
   readonly status: number;
@@ -252,6 +296,10 @@ function parseObservation(rawBody: Uint8Array): PaymentObservation {
   if (paymentSource !== PAYMENT_SOURCE) {
     throw new WebhookPayloadError("payment_source must be 'zcash'");
   }
+  const byConfirmations = optionalAmounts(value.received_by_confirmations);
+  if (byConfirmations === null) {
+    throw new WebhookPayloadError("received_by_confirmations must be an array of amount strings");
+  }
 
   return {
     event_id: eventId,
@@ -259,6 +307,7 @@ function parseObservation(rawBody: Uint8Array): PaymentObservation {
     address,
     total_received: totalReceived,
     observed_at: observedAt,
+    ...(byConfirmations ? { received_by_confirmations: byConfirmations } : {}),
   };
 }
 
@@ -279,7 +328,9 @@ function parsePaymentStatus(value: unknown): PaymentStatus | null {
   const amount = nullableStr("amount");
   const returnUrl = nullableStr("return_url");
   const stateVersion = value.state_version;
+  const byConfirmations = optionalAmounts(value.received_by_confirmations);
   if (
+    byConfirmations === null ||
     !paymentId || !address || !qrText || !payUrl || !totalReceived || !createdAt ||
     !status || !PAYMENT_STATUSES.includes(status) ||
     label === undefined || message === undefined || amount === undefined || returnUrl === undefined ||
@@ -296,6 +347,7 @@ function parsePaymentStatus(value: unknown): PaymentStatus | null {
     message,
     amount,
     total_received: totalReceived,
+    ...(byConfirmations ? { received_by_confirmations: byConfirmations } : {}),
     state_version: stateVersion,
     status: status as PaymentStatusValue,
     return_url: returnUrl,

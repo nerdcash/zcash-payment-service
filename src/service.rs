@@ -5,7 +5,7 @@ use axum::{
 use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use serde::{Deserialize, Serialize};
 
-use crate::db::{AttributedScannedReceipt, ReceiptKind};
+use crate::db::{format_zat_array, AttributedScannedReceipt, ReceiptKind};
 use crate::{
     config::{validate_return_url, Config},
     db::{
@@ -24,6 +24,10 @@ pub struct PaymentService {
     public_base_url: Option<String>,
     dev_simulated_payments: bool,
     return_url_allowed_origins: Vec<String>,
+    required_confirmations: Option<u32>,
+    /// The database's stored reporting threshold, applied to simulated receipts with an
+    /// explicit depth.
+    webhook_report_confirmations: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +75,10 @@ pub struct PaymentStatusResponse {
     pub message: Option<String>,
     pub amount: Option<String>,
     pub total_received: String,
+    /// Total received with at least `i` confirmations at index `i`, from 0 (mempool) to
+    /// `REQUIRED_CONFIRMATIONS`. Omitted when that setting is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_by_confirmations: Option<Vec<String>>,
     pub state_version: i64,
     pub status: PaymentStatus,
     pub return_url: Option<String>,
@@ -81,7 +89,17 @@ pub struct PaymentStatusResponse {
 pub struct SimulatePaymentRequest {
     pub address: String,
     pub amount: String,
+    /// Confirmations to simulate: `0` is a mempool receipt. Omitted means fully confirmed.
+    #[serde(default)]
+    pub confirmations: Option<u32>,
+    /// Re-reports an earlier simulated transaction (for example at a new depth) instead of
+    /// adding a new one.
+    #[serde(default)]
+    pub txid: Option<String>,
 }
+
+/// Chain tip that simulated receipts are measured against.
+const SIMULATED_TIP_HEIGHT: i64 = 1_000_000;
 
 #[derive(Debug, Serialize)]
 pub struct SimulatePaymentResponse {
@@ -144,6 +162,8 @@ impl PaymentService {
             dev_simulated_payments: config.dev_simulated_payments
                 && wallet_identity.network == "testnet",
             return_url_allowed_origins: config.return_url_allowed_origins.clone(),
+            required_confirmations: config.required_confirmations,
+            webhook_report_confirmations: service_metadata.webhook_report_confirmations,
         })
     }
 
@@ -223,28 +243,56 @@ impl PaymentService {
             .ok_or_else(|| AppError::NotFound("unknown address".into()))?;
         // Mark first, so the database is flagged even if recording the receipt fails partway.
         self.app_db.mark_simulated_data()?;
-        let txid_hex = hex_string(&{
-            let mut bytes = [0u8; 32];
-            UnwrapErr(SysRng).fill_bytes(&mut bytes);
-            bytes
-        });
+        let txid_hex = match request.txid.as_deref().map(str::trim) {
+            Some(txid) => {
+                if txid.len() != 64 || !txid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return Err(AppError::InvalidRequest(
+                        "txid must be 64 hex characters".into(),
+                    ));
+                }
+                txid.to_ascii_lowercase()
+            }
+            None => hex_string(&{
+                let mut bytes = [0u8; 32];
+                UnwrapErr(SysRng).fill_bytes(&mut bytes);
+                bytes
+            }),
+        };
+        let (receipt_kind, mined_height, confirmation_depth) = match request.confirmations {
+            Some(0) => (ReceiptKind::Mempool, 0, 0),
+            Some(confirmations) => {
+                let confirmations = i64::from(confirmations).min(SIMULATED_TIP_HEIGHT);
+                (
+                    ReceiptKind::Mined,
+                    SIMULATED_TIP_HEIGHT - confirmations + 1,
+                    confirmations,
+                )
+            }
+            None => (ReceiptKind::Mined, 1, SIMULATED_TIP_HEIGHT),
+        };
+        // Like a scanned receipt, an explicit depth below WEBHOOK_REPORT_CONFIRMATIONS isn't
+        // reported yet. Omitting `confirmations` keeps the fully confirmed behavior.
+        let eligible_for_webhook = confirmation_depth >= self.webhook_report_confirmations;
         let now = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)?;
         let affected = self.app_db.apply_attributed_receipts(
             &[AttributedScannedReceipt {
                 address_id: record.address_id,
-                receipt_uid: format!("{txid_hex}:simulated:0"),
+                // One receipt per (transaction, address), like separate outputs of a real
+                // transaction, so reusing a txid for another address never moves a receipt
+                // away from the first.
+                receipt_uid: format!("{txid_hex}:simulated:{}", record.address_id),
                 txid_hex: txid_hex.clone(),
                 pool: "orchard".into(),
                 value_zat,
-                mined_height: 1,
-                confirmation_depth: 1_000,
-                eligible_for_webhook: true,
-                receipt_kind: ReceiptKind::Mined,
+                mined_height,
+                confirmation_depth,
+                eligible_for_webhook,
+                receipt_kind,
                 first_observed_at: now.clone(),
                 last_observed_at: now,
             }],
-            1_000,
+            SIMULATED_TIP_HEIGHT,
             u32::MAX,
         )?;
         self.app_db
@@ -302,6 +350,14 @@ impl PaymentService {
             message: record.request_message,
             amount,
             total_received: format_zat_as_zec(record.current_total_zat),
+            received_by_confirmations: self.required_confirmations.map(|required| {
+                // An address with no receipts yet has not been computed; report zeros.
+                let by_confirmations = record
+                    .received_by_confirmations_zat
+                    .clone()
+                    .unwrap_or_else(|| vec![0; required as usize + 1]);
+                format_zat_array(&by_confirmations)
+            }),
             state_version: record.state_version,
             status,
             return_url: record.return_url,
@@ -571,6 +627,7 @@ mod tests {
             finality_confirmations: 100,
             public_base_url: None,
             dev_simulated_payments: false,
+            required_confirmations: None,
             return_url_allowed_origins: Vec::new(),
         }
     }
@@ -1004,8 +1061,138 @@ mod tests {
             .simulate_payment(super::SimulatePaymentRequest {
                 address: address.into(),
                 amount: amount.into(),
+                confirmations: None,
+                txid: None,
             })
             .map(|response| response.total_received)
+    }
+
+    #[test]
+    fn status_reports_received_by_confirmations_through_simulated_depths() {
+        let temp = tempdir().unwrap();
+        let mut config = config(temp.path());
+        config.network = "testnet".into();
+        config.startup_uivk = Some(TESTNET_UIVK.into());
+        config.dev_simulated_payments = true;
+        config.webhook_report_confirmations = 0;
+        config.required_confirmations = Some(2);
+        let service = PaymentService::initialize(config).unwrap();
+        let session = service
+            .issue_payment_session(session_request(Some("0.1"), None))
+            .unwrap();
+        let depths = |service: &PaymentService| {
+            service
+                .payment_status(&session.payment_id)
+                .unwrap()
+                .received_by_confirmations
+                .unwrap()
+        };
+        assert_eq!(depths(&service), ["0.00000000"; 3]);
+
+        let pay = |confirmations, txid: Option<String>| {
+            service
+                .simulate_payment(super::SimulatePaymentRequest {
+                    address: session.address.clone(),
+                    amount: "0.1".into(),
+                    confirmations: Some(confirmations),
+                    txid,
+                })
+                .unwrap()
+                .txid
+        };
+        let txid = pay(0, None);
+        assert_eq!(depths(&service), ["0.10000000", "0.00000000", "0.00000000"]);
+        pay(1, Some(txid.clone()));
+        assert_eq!(depths(&service), ["0.10000000", "0.10000000", "0.00000000"]);
+        pay(5, Some(txid));
+        assert_eq!(depths(&service), ["0.10000000"; 3]);
+        assert_eq!(
+            service
+                .payment_status(&session.payment_id)
+                .unwrap()
+                .total_received,
+            "0.10000000"
+        );
+    }
+
+    fn simulated_service(temp: &std::path::Path, report_confirmations: u32) -> PaymentService {
+        let mut config = config(temp);
+        config.network = "testnet".into();
+        config.startup_uivk = Some(TESTNET_UIVK.into());
+        config.dev_simulated_payments = true;
+        config.webhook_report_confirmations = report_confirmations;
+        PaymentService::initialize(config).unwrap()
+    }
+
+    fn simulate_at(
+        service: &PaymentService,
+        address: &str,
+        confirmations: u32,
+        txid: Option<String>,
+    ) -> super::SimulatePaymentResponse {
+        service
+            .simulate_payment(super::SimulatePaymentRequest {
+                address: address.into(),
+                amount: "0.1".into(),
+                confirmations: Some(confirmations),
+                txid,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn reusing_a_simulated_txid_at_another_address_keeps_both_receipts() {
+        let temp = tempdir().unwrap();
+        let service = simulated_service(temp.path(), 0);
+        let a = service
+            .issue_payment_session(session_request(Some("0.1"), None))
+            .unwrap();
+        let b = service
+            .issue_payment_session(session_request(Some("0.1"), None))
+            .unwrap();
+        let txid = simulate_at(&service, &a.address, 1, None).txid;
+        simulate_at(&service, &b.address, 1, Some(txid));
+        for session in [&a, &b] {
+            assert_eq!(
+                service
+                    .payment_status(&session.payment_id)
+                    .unwrap()
+                    .total_received,
+                "0.10000000"
+            );
+        }
+    }
+
+    #[test]
+    fn simulated_depths_below_the_reporting_threshold_are_not_counted() {
+        let temp = tempdir().unwrap();
+        let service = simulated_service(temp.path(), 3);
+        let session = service
+            .issue_payment_session(session_request(Some("0.1"), None))
+            .unwrap();
+        let total = |service: &PaymentService| {
+            service
+                .payment_status(&session.payment_id)
+                .unwrap()
+                .total_received
+        };
+        let txid = simulate_at(&service, &session.address, 1, None).txid;
+        assert_eq!(total(&service), "0.00000000");
+        simulate_at(&service, &session.address, 3, Some(txid));
+        assert_eq!(total(&service), "0.10000000");
+    }
+
+    #[test]
+    fn status_omits_received_by_confirmations_when_not_configured() {
+        let temp = tempdir().unwrap();
+        let service = PaymentService::initialize(config(temp.path())).unwrap();
+        let session = service
+            .issue_payment_session(session_request(Some("1"), None))
+            .unwrap();
+        let status = service.payment_status(&session.payment_id).unwrap();
+        assert!(status.received_by_confirmations.is_none());
+        let json = serde_json::to_value(&status).unwrap();
+        assert!(json.get("received_by_confirmations").is_none());
     }
 
     #[test]

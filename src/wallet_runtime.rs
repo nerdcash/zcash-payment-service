@@ -296,13 +296,16 @@ where
         affected_address_ids.extend(reorg_outcome.affected_address_ids);
     }
 
+    let reorg_affected_address_ids = reorg_affected_address_ids.into_iter().collect::<Vec<_>>();
+    // Overlap reconciliation also recomputes depths on ordinary blocks, which can change
+    // received_by_confirmations without a reorg. Queue those changes here: the maturity pass
+    // below would find nothing left to change.
+    let queued =
+        app_db.queue_webhook_deliveries_for_dirty_addresses(&reorg_affected_address_ids)?;
     if previous_tip_height > i64::from(tip_height)
         || reorg_revoked_receipt_count > 0
         || reorg_reactivated_receipt_count > 0
     {
-        let reorg_affected_address_ids = reorg_affected_address_ids.into_iter().collect::<Vec<_>>();
-        let queued =
-            app_db.queue_webhook_deliveries_for_dirty_addresses(&reorg_affected_address_ids)?;
         let rewind_height = reorg_rewind_height.unwrap_or(tip_height);
         let notes = format!(
             "reconciled reorg from height {} through tip {} with {} revoked, {} reactivated, {} inserted receipts; queued {} webhook deliveries",
@@ -1162,6 +1165,7 @@ mod tests {
             finality_confirmations: 100,
             public_base_url: None,
             dev_simulated_payments: false,
+            required_confirmations: None,
             return_url_allowed_origins: Vec::new(),
         }
     }
@@ -1373,6 +1377,92 @@ mod tests {
         assert_eq!(metadata.last_seen_tip_height, 102);
         assert_eq!(metadata.last_scanned_height, 102);
         assert_eq!(current_total(&config.app_db_path, address_id), 25);
+    }
+
+    #[tokio::test]
+    async fn deterministic_lightwalletd_queues_depth_changes_found_by_overlap_reconciliation() {
+        let temp = tempdir().unwrap();
+        let mut config = config(temp.path());
+        config.birthday_height = Some(100);
+        config.catch_up_batch_size = 4;
+        config.finality_confirmations = 3;
+        config.webhook_report_confirmations = 0;
+        config.required_confirmations = Some(2);
+        let app_db = AppDb::open(&config.app_db_path).unwrap();
+        let wallet_identity = app_db.ensure_wallet_identity(&config).unwrap();
+        app_db.ensure_service_metadata(&config).unwrap();
+        let address_id = insert_test_address(&app_db, "uaddr1deterministic-depth", "sapling-depth");
+        let receipt = |confirmations| {
+            mined_receipt(
+                address_id,
+                "tx-depth-110",
+                "tx-depth-110:sapling:0",
+                9,
+                110,
+                confirmations,
+            )
+        };
+        app_db
+            .reconcile_attributed_receipts_in_range(
+                &[receipt(1)],
+                107,
+                110,
+                110,
+                config.finality_confirmations,
+            )
+            .unwrap();
+        app_db
+            .queue_webhook_deliveries_for_dirty_addresses(&[address_id])
+            .unwrap();
+        app_db
+            .record_sync_status("synced", "seeded at tip 110", 110, 110)
+            .unwrap();
+        let depths = |path: &std::path::Path| -> Vec<Option<String>> {
+            let conn = rusqlite::Connection::open(path).unwrap();
+            let mut stmt = conn
+                .prepare("SELECT received_by_confirmations FROM webhook_deliveries ORDER BY delivery_id ASC")
+                .unwrap();
+            let rows = stmt.query_map([], |row| row.get(0)).unwrap();
+            rows.map(|row| row.unwrap()).collect()
+        };
+        assert_eq!(
+            depths(&config.app_db_path),
+            vec![Some("[9,9,0]".to_string())]
+        );
+
+        // An otherwise empty block: only the overlap pass sees the receipt deepen.
+        let service_metadata = app_db.current_service_metadata().unwrap();
+        sync_with_lightwalletd_with(
+            &config,
+            &app_db,
+            &wallet_identity,
+            &service_metadata,
+            "https://example.invalid",
+            |_| async { Ok(111) },
+            |tip_height, overlap_batch| {
+                let app_db = app_db.clone();
+                async move {
+                    app_db.reconcile_attributed_receipts_in_range(
+                        &[receipt(2)],
+                        i64::from(overlap_batch.start_height),
+                        i64::from(overlap_batch.end_height),
+                        i64::from(tip_height),
+                        3,
+                    )
+                }
+            },
+            |_tip_height, _first_batch, final_height, _batch_size| async move {
+                Ok((Vec::new(), i64::from(final_height)))
+            },
+            |_tip_height, _revoke_missing| async { Ok(Vec::new()) },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            depths(&config.app_db_path),
+            vec![Some("[9,9,0]".to_string()), Some("[9,9,9]".to_string())]
+        );
     }
 
     #[tokio::test]
