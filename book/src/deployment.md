@@ -1,6 +1,8 @@
 # Deployment
 
-The same crate ships as a library and as a container. CI on `main` compiles the binary, builds a `linux/amd64` and `linux/arm64` image, and pushes it to GHCR. Pull requests build the image and do not push it.
+The same crate ships as a library and as a container. CI on `main` compiles the binary, builds a `linux/amd64` and `linux/arm64` image, and pushes it to GHCR as `:main`. Pull requests build the image and do not push it.
+
+Releases are tagged `v<version>`. Each one publishes `ghcr.io/nerdcash/zcash-payment-service:v<version>` and `:<version>`, and a stable release also moves `:<major>.<minor>` and `:latest`. Pin a version tag in production so an upgrade happens only when you choose it. `:main` follows every merge.
 
 ## Rust crate
 

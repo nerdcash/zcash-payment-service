@@ -27,8 +27,8 @@ pub fn spawn_webhook_delivery_worker(config: Config) {
 }
 
 async fn delivery_loop(config: Config) -> Result<(), AppError> {
-    let app_db = AppDb::open(&config.app_db_path)?;
     let client = reqwest::Client::builder().build()?;
+    let app_db = open_app_db_with_retry(&config).await;
 
     loop {
         match deliver_ready_once(&app_db, &client, &config).await {
@@ -45,6 +45,40 @@ async fn delivery_loop(config: Config) -> Result<(), AppError> {
                     config.webhook_poll_interval_seconds,
                 ))
                 .await;
+            }
+        }
+    }
+}
+
+/// Opens the app database, retrying while it is briefly locked by other startup work (for example
+/// the wallet runtime initializing the schema). A failure here used to stop webhook delivery for
+/// the life of the process.
+async fn open_app_db_with_retry(config: &Config) -> AppDb {
+    retry_open(
+        || AppDb::open(&config.app_db_path),
+        |delay| tokio::time::sleep(delay),
+    )
+    .await
+}
+
+const OPEN_RETRY_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+const OPEN_RETRY_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Calls `open` until it succeeds, sleeping with exponential backoff between attempts.
+async fn retry_open<T, O, S, F>(mut open: O, mut sleep: S) -> T
+where
+    O: FnMut() -> Result<T, AppError>,
+    S: FnMut(std::time::Duration) -> F,
+    F: std::future::Future<Output = ()>,
+{
+    let mut delay = OPEN_RETRY_INITIAL_DELAY;
+    loop {
+        match open() {
+            Ok(value) => return value,
+            Err(error) => {
+                tracing::warn!(error = %error, retry_in_ms = delay.as_millis() as u64, "webhook delivery worker could not open the app database; retrying");
+                sleep(delay).await;
+                delay = (delay * 2).min(OPEN_RETRY_MAX_DELAY);
             }
         }
     }
@@ -343,6 +377,36 @@ mod tests {
         assert!(!super::should_permanently_fail(&config, 0));
         assert!(!super::should_permanently_fail(&config, 1));
         assert!(super::should_permanently_fail(&config, 2));
+    }
+
+    #[tokio::test]
+    async fn open_is_retried_with_backoff_until_it_succeeds() {
+        use std::time::Duration;
+        let mut failures_left = 9;
+        let mut slept = Vec::new();
+        let value = super::retry_open(
+            || {
+                if failures_left > 0 {
+                    failures_left -= 1;
+                    Err(crate::error::AppError::InvalidConfig(
+                        "database is locked".into(),
+                    ))
+                } else {
+                    Ok(42)
+                }
+            },
+            |delay| {
+                slept.push(delay);
+                std::future::ready(())
+            },
+        )
+        .await;
+        assert_eq!(value, 42);
+        let ms: Vec<u128> = slept.iter().map(Duration::as_millis).collect();
+        assert_eq!(
+            ms,
+            vec![250, 500, 1000, 2000, 4000, 8000, 16000, 30000, 30000]
+        );
     }
 
     #[tokio::test]
