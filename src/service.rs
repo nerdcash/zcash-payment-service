@@ -451,7 +451,8 @@ pub fn build_qr_text(
         query.push(format!("amount={}", encode_uri_component(amount)));
     }
     if let Some(memo) = memo.filter(|value| !value.trim().is_empty()) {
-        query.push(format!("memo={}", encode_uri_component(memo)));
+        // ZIP-321 carries the memo as unpadded base64url of its bytes.
+        query.push(format!("memo={}", base64url_unpadded(memo.as_bytes())));
     }
     if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
         query.push(format!("message={}", encode_uri_component(message)));
@@ -462,6 +463,20 @@ pub fn build_qr_text(
     } else {
         format!("zcash:{address}?{}", query.join("&"))
     }
+}
+
+fn base64url_unpadded(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for index in 0..=chunk.len() {
+            out.push(ALPHABET[((n >> (18 - 6 * index)) & 63) as usize] as char);
+        }
+    }
+    out
 }
 
 fn encode_uri_component(value: &str) -> String {
@@ -578,7 +593,7 @@ mod tests {
                 Some("Invoice INV-1001"),
                 Some("Thanks for your purchase."),
             ),
-            "zcash:uaddr?amount=0.12345678&memo=Invoice%20INV-1001&message=Thanks%20for%20your%20purchase."
+            "zcash:uaddr?amount=0.12345678&memo=SW52b2ljZSBJTlYtMTAwMQ&message=Thanks%20for%20your%20purchase."
         );
     }
 

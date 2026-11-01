@@ -8,7 +8,7 @@ service, on your own host. No other party sees the payment.
 2. The response includes `payment_id` and `pay_url`. Redirect the payer to `pay_url`, or send it
    to them as a payment link.
 3. The page shows the amount, a QR code of the ZIP-321 `zcash:` URI, an **Open in wallet**
-   button, and the address. It polls `GET /payments/{payment_id}` every few seconds.
+   button, and the address. It polls `GET /payments/{payment_id}` every few seconds, and reloads when the payment request changes (after a partial payment it asks only for the rest).
 4. When the received total covers the amount, the page says so and, if you gave a
    `return_url`, sends the payer back there. Without a `return_url` the page keeps polling, so it
    also shows a receipt that is later dropped (for example an unconfirmed transaction that never

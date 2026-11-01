@@ -77,6 +77,7 @@ pub fn render_pay_page(status: &PaymentStatusResponse) -> Result<String, AppErro
     let script_data = serde_json::to_string(&serde_json::json!({
         "paymentId": status.payment_id,
         "returnUrl": status.return_url,
+        "qrText": status.qr_text,
         "status": status.status,
     }))?
     .replace('<', "\\u003c");
@@ -143,6 +144,9 @@ h1 {{ font-size: 1.25rem; margin: 0 0 .5rem; }}
         const body = await response.json();
         show(body.status, body.total_received);
         if (done(body.status)) {{ finish(); return; }}
+        // The request changes after a partial payment (it asks only for the rest). Reload so
+        // the QR code and wallet link never ask for more than is still owed.
+        if (body.qr_text && body.qr_text !== data.qrText) {{ window.location.reload(); return; }}
       }}
     }} catch (e) {{ /* keep polling */ }}
     setTimeout(poll, 3000);
