@@ -4,7 +4,7 @@ import { readState } from "./lib/decide"
 import { HANDLER_CODE, rateFor } from "./lib/options"
 import { ServiceClient } from "./lib/service-client"
 import { isZcashPayment } from "./payments"
-import { amountToZat, minorUnitsToString, resolvePayUrl, zatToZec, zecToZat } from "./lib/zcash"
+import { amountToZat, minorUnitsToString, resolvePayUrl, settledZat, zatToZec, zecToZat } from "./lib/zcash"
 
 /** What the handler stores in a Zcash payment's metadata. `public` is visible to the Shop API. */
 export interface ZcashPaymentMetadata {
@@ -112,13 +112,19 @@ export const zcashPaymentHandler = new PaymentMethodHandler({
       return refuse("This Zcash payment is flagged for review. Refund or reconcile it by hand.")
     }
     const live = await new ServiceClient(options.serviceUrl).status(data.payment_id, data.address)
-    const received = live ? zecToZat(String(live.total_received ?? "")) : null
+    // Settle only what has the service's REQUIRED_CONFIRMATIONS (everything, when it isn't set).
+    const total = live ? zecToZat(String(live.total_received ?? "")) : null
+    const received = live && total !== null ? settledZat(live, total) : null
     if (received === null) {
       return refuse("Cannot reach zcash-payment-service to confirm the payment.")
     }
     const due = BigInt(String(data.amount_zat ?? "0"))
     if (due <= 0n || received < due) {
-      return refuse(`Received ${zatToZec(received)} of ${zatToZec(due)} ZEC so far.`)
+      return refuse(
+        total !== null && total >= due
+          ? `Payment of ${zatToZec(total)} ZEC received, pending confirmation.`
+          : `Received ${zatToZec(received)} of ${zatToZec(due)} ZEC so far.`
+      )
     }
     return { success: true }
   },

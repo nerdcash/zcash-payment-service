@@ -4,7 +4,7 @@ import { processPaymentWorkflow } from "@medusajs/medusa/core-flows"
 import { decide, readState, type ZcashState } from "../../../lib/decide"
 import { findProviderConfig } from "../../../lib/options"
 import { ServiceClient } from "../../../lib/service-client"
-import { amountToString, parseObservation, verifySignature, zatToZec, zecToZat } from "../../../lib/zcash"
+import { amountToString, parseObservation, settledZat, verifySignature, zatToZec, zecToZat } from "../../../lib/zcash"
 import type { ZcashSessionData } from "../../../providers/zcash/service"
 
 /** Event emitted when the plugin holds or releases a paid order, for merchants to act on. */
@@ -140,12 +140,14 @@ async function apply(
   }
   const decision = decide({
     state,
-    totalZat: observation.totalZat,
+    // Capture and holds follow the confirmed amount; index 0 (everything seen) only informs.
+    totalZat: observation.settledZat,
+    seenZat: observation.totalZat,
     stateVersion: observation.stateVersion,
     dueZat,
     ...flags(loaded),
   })
-  const zec = zatToZec(observation.totalZat)
+  const zec = zatToZec(observation.settledZat)
 
   const setOrderMetadata = async (orderId: string | undefined, patch: Record<string, unknown>) => {
     if (!orderId) {
@@ -158,7 +160,7 @@ async function apply(
   const next: ZcashState = {
     ...state,
     state_version: observation.stateVersion,
-    received_zat: observation.totalZat.toString(),
+    received_zat: observation.settledZat.toString(),
   }
   const orderId: string | undefined = loaded.order?.id
 
@@ -200,6 +202,7 @@ async function apply(
     }
     case "note":
     case "partial":
+    case "pending":
       logger.info(`Zcash payment ${sessionId}: ${decision.message}`)
       break
     case "capture": {
@@ -254,7 +257,8 @@ async function apply(
 
   async function liveTotal(): Promise<bigint> {
     const live = await new ServiceClient(serviceUrl).status(data!.payment_id, data!.address)
-    const liveZat = live ? zecToZat(String(live.total_received ?? "")) : null
+    const liveTotal = live ? zecToZat(String(live.total_received ?? "")) : null
+    const liveZat = live && liveTotal !== null ? settledZat(live, liveTotal) : null
     if (liveZat === null) {
       throw new RetryError("cannot confirm with the service, retry")
     }

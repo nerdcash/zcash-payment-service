@@ -15,6 +15,8 @@ final class Zcash_EDD_Gateway {
 	const META_QR_TEXT       = '_zcash_qr_text';
 	const META_AMOUNT_ZAT    = '_zcash_amount_zat';
 	const META_RECEIVED_ZAT  = '_zcash_received_zat';
+	// Everything seen so far, mempool included; META_RECEIVED_ZAT is the confirmed part.
+	const META_SEEN_ZAT      = '_zcash_seen_zat';
 	const META_STATE_VERSION = '_zcash_state_version';
 	const META_PRICED        = '_zcash_priced_total';
 	const META_NEEDS_REVIEW  = '_zcash_needs_review';
@@ -361,7 +363,7 @@ final class Zcash_EDD_Gateway {
 			echo '<p class="zcash-payment-seen">' . esc_html__( 'Payment seen. Waiting for confirmation; refresh in a moment.', 'zcash-payment-edd' ) . '</p></section>';
 			return;
 		}
-		$received = Zcash_EDD_Util::zec_to_zat( (string) ( $live['total_received'] ?? '' ) ) ?? (int) self::meta( $order_id, self::META_RECEIVED_ZAT );
+		$received = Zcash_EDD_Util::zec_to_zat( (string) ( $live['total_received'] ?? '' ) ) ?? (int) ( self::meta( $order_id, self::META_SEEN_ZAT ) ?: self::meta( $order_id, self::META_RECEIVED_ZAT ) );
 		// After a partial payment the service's request asks only for the rest.
 		$qr_text   = is_string( $live['qr_text'] ?? null ) && '' !== $live['qr_text'] ? $live['qr_text'] : self::meta( $order_id, self::META_QR_TEXT );
 		$remaining = $due - $received;
@@ -402,7 +404,7 @@ final class Zcash_EDD_Gateway {
 		if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
 			return null;
 		}
-		$body = json_decode( (string) wp_remote_retrieve_body( $response ), true );
+		$body = Zcash_EDD_Util::decode_json( (string) wp_remote_retrieve_body( $response ) );
 		// Only trust the service's view for this order's own address.
 		return is_array( $body ) && hash_equals( self::meta( $order_id, self::META_ADDRESS ), (string) ( $body['address'] ?? '' ) ) ? $body : null;
 	}

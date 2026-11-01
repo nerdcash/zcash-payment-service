@@ -18,7 +18,7 @@ import { decide, readState, type ZcashState } from "./lib/decide"
 import { type ZcashPluginOptions } from "./lib/options"
 import { isZcashPayment, rowLock } from "./payments"
 import { ServiceClient } from "./lib/service-client"
-import { parseObservation, verifySignature, zatToZec, zecToZat, type Observation } from "./lib/zcash"
+import { parseObservation, settledZat, verifySignature, zatToZec, zecToZat, type Observation } from "./lib/zcash"
 
 export interface WebhookResult {
   status: number
@@ -113,16 +113,19 @@ export class ZcashWebhookService {
     })
     const decision = decide({
       state,
-      totalZat: observation.totalZat,
+      // Settlement and holds follow the confirmed amount; index 0 (everything seen) only informs.
+      totalZat: observation.settledZat,
+      seenZat: observation.totalZat,
       stateVersion: observation.stateVersion,
       dueZat,
       ...flags(payment, order),
     })
-    const zec = zatToZec(observation.totalZat)
+    const zec = zatToZec(observation.settledZat)
     const next: ZcashState = {
       ...state,
       state_version: observation.stateVersion,
-      received_zat: observation.totalZat.toString(),
+      received_zat: observation.settledZat.toString(),
+      seen_zat: observation.totalZat.toString(),
     }
     const note = (text: string) =>
       this.historyService.createHistoryEntryForOrder(
@@ -148,7 +151,8 @@ export class ZcashWebhookService {
         String(meta.payment_id ?? ""),
         String(meta.address ?? "")
       )
-      const zat = live ? zecToZat(String(live.total_received ?? "")) : null
+      const total = live ? zecToZat(String(live.total_received ?? "")) : null
+      const zat = live && total !== null ? settledZat(live, total) : null
       if (zat === null) {
         throw new RetryError("cannot confirm with the service, retry")
       }
@@ -189,6 +193,13 @@ export class ZcashWebhookService {
       case "note":
       case "partial":
         Logger.info(`Order ${order.code}: ${decision.message}`, loggerCtx)
+        break
+      case "pending":
+        Logger.info(`Order ${order.code}: ${decision.message}`, loggerCtx)
+        // Each block deepening the payment sends an event; note only a change in the amount.
+        if (state.seen_zat !== observation.totalZat.toString()) {
+          await note(`Zcash: ${decision.message}`)
+        }
         break
       case "capture": {
         // A retried delivery may describe funds that were dropped since. Confirm first.

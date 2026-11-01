@@ -130,8 +130,37 @@ export interface Observation {
   eventId: string
   address: string
   totalReceived: string
+  /** Everything received, mempool included. */
   totalZat: bigint
+  /**
+   * What has the service's REQUIRED_CONFIRMATIONS: the last `received_by_confirmations`
+   * element, or `totalZat` when the service doesn't send that array.
+   */
+  settledZat: bigint
   stateVersion: number
+}
+
+/**
+ * The amount with the service's required confirmations, from a webhook body or a status
+ * response: the last `received_by_confirmations` element, or `totalZat` when the array is absent.
+ * Null when the array is malformed.
+ */
+export function settledZat(data: Record<string, unknown>, totalZat: bigint): bigint | null {
+  if (!("received_by_confirmations" in data) || data.received_by_confirmations === undefined) {
+    return totalZat
+  }
+  const depths = data.received_by_confirmations
+  if (!Array.isArray(depths) || depths.length === 0 || depths.length > 101) {
+    return null
+  }
+  let settled: bigint | null = null
+  for (const depth of depths) {
+    settled = typeof depth === "string" ? zecToZat(depth) : null
+    if (settled === null) {
+      return null
+    }
+  }
+  return settled
 }
 
 /** Validates a webhook body and returns its fields, or null. */
@@ -163,11 +192,16 @@ export function parseObservation(raw: Buffer | string): Observation | null {
   if (totalZat === null || !Number.isSafeInteger(stateVersion)) {
     return null
   }
+  const settled = settledZat(data, totalZat)
+  if (settled === null) {
+    return null
+  }
   return {
     eventId: data.event_id as string,
     address: data.address as string,
     totalReceived: data.total_received as string,
     totalZat,
+    settledZat: settled,
     stateVersion,
   }
 }

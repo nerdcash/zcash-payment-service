@@ -11,6 +11,8 @@ export interface ServiceStatus {
   address: string
   status?: string
   total_received?: string
+  /** Index i: total with at least i confirmations. Present when the service sets REQUIRED_CONFIRMATIONS. */
+  received_by_confirmations?: string[]
   qr_text?: string
   [key: string]: unknown
 }

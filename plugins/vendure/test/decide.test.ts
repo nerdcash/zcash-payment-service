@@ -71,3 +71,13 @@ test("readState tolerates junk", () => {
     needs_review: true,
   })
 })
+
+test("a payment seen but not yet confirmed waits, then settles at the required depth", () => {
+  const pending = d({ seenZat: 50_000_000n, totalZat: 0n })
+  assert.equal(pending.type, "pending")
+  assert.match((pending as { message: string }).message, /pending confirmation/)
+  assert.equal(d({ seenZat: 50_000_000n, totalZat: 20_000_000n }).type, "pending")
+  assert.equal(d({ seenZat: 50_000_000n, totalZat: 50_000_000n }).type, "capture")
+  // A reorg that undoes the confirmations on a settled payment holds the order.
+  assert.equal(d({ paid: true, seenZat: 50_000_000n, totalZat: 0n }).type, "hold")
+})

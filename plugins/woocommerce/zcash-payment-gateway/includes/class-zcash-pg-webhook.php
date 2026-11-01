@@ -109,7 +109,10 @@ final class Zcash_PG_Webhook {
 			return new WP_REST_Response( array( 'ok' => true, 'ignored' => 'stale' ), 200 );
 		}
 
-		$total = $observation['total_zat'];
+		// Decisions use the confirmed amount: everything received when the service doesn't report
+		// confirmation depths, otherwise what has the service's REQUIRED_CONFIRMATIONS.
+		$total = $observation['settled_zat'];
+		$seen  = $observation['total_zat'];
 		$due   = (int) $order->get_meta( Zcash_PG_Gateway::META_AMOUNT_ZAT );
 		$zec   = Zcash_PG_Util::zat_to_zec( $total );
 
@@ -201,7 +204,8 @@ final class Zcash_PG_Webhook {
 			// that was later dropped). Confirm the service still sees the funds first.
 			$gateway = self::gateway();
 			$live    = $gateway ? $gateway->service_status( $order ) : null;
-			$live_zat = null === $live ? null : Zcash_PG_Util::zec_to_zat( (string) ( $live['total_received'] ?? '' ) );
+			$live_total = null === $live ? null : Zcash_PG_Util::zec_to_zat( (string) ( $live['total_received'] ?? '' ) );
+			$live_zat   = null === $live_total ? null : Zcash_PG_Util::settled_zat( $live, $live_total );
 			if ( null === $live_zat ) {
 				return new WP_REST_Response( array( 'error' => 'cannot confirm with the service, retry' ), 503 );
 			}
@@ -253,19 +257,31 @@ final class Zcash_PG_Webhook {
 				/* translators: %s: ZEC total */
 				$order->add_order_note( sprintf( __( 'Received %s ZEC. Payment complete.', 'zcash-payment-gateway' ), $zec ) );
 			}
-		} else {
-			$order->add_order_note(
-				sprintf(
-					/* translators: 1: received ZEC, 2: due ZEC */
-					__( 'Received %1$s of %2$s ZEC so far.', 'zcash-payment-gateway' ),
-					$zec,
-					Zcash_PG_Util::zat_to_zec( $due )
-				)
-			);
+		} elseif ( (string) $seen !== (string) $order->get_meta( Zcash_PG_Gateway::META_SEEN_ZAT ) ) {
+			// Each new block deepening a payment sends an event; note only a change in the amount.
+			if ( $due > 0 && $seen >= $due ) {
+				$order->add_order_note(
+					sprintf(
+						/* translators: %s: received ZEC */
+						__( 'Payment of %s ZEC received, pending confirmation. The order completes once it is confirmed.', 'zcash-payment-gateway' ),
+						Zcash_PG_Util::zat_to_zec( $seen )
+					)
+				);
+			} else {
+				$order->add_order_note(
+					sprintf(
+						/* translators: 1: received ZEC, 2: due ZEC */
+						__( 'Received %1$s of %2$s ZEC so far.', 'zcash-payment-gateway' ),
+						Zcash_PG_Util::zat_to_zec( $seen ),
+						Zcash_PG_Util::zat_to_zec( $due )
+					)
+				);
+			}
 		}
 
 		// Record the version last, after the transition above succeeded.
 		$order->update_meta_data( Zcash_PG_Gateway::META_RECEIVED_ZAT, (string) $total );
+		$order->update_meta_data( Zcash_PG_Gateway::META_SEEN_ZAT, (string) $seen );
 		$order->update_meta_data( Zcash_PG_Gateway::META_STATE_VERSION, (string) $observation['state_version'] );
 		$order->save();
 

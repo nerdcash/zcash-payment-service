@@ -29,7 +29,7 @@ import type {
 } from "@medusajs/framework/types"
 import { PROVIDER_IDENTIFIER, rateFor, validateOptions, type ZcashOptions } from "../../lib/options"
 import { ServiceClient } from "../../lib/service-client"
-import { amountToString, amountToZat, resolvePayUrl, zatToZec, zecToZat } from "../../lib/zcash"
+import { amountToString, amountToZat, resolvePayUrl, settledZat, zatToZec, zecToZat } from "../../lib/zcash"
 
 /** What the provider stores in a payment session's `data`. */
 export interface ZcashSessionData {
@@ -149,7 +149,11 @@ export class ZcashPaymentProviderService extends AbstractPaymentProvider<ZcashOp
     return { data: await this.createSession(input.amount, input.currency_code, input.data) }
   }
 
-  /** Maps the service's live total to a session status. */
+  /**
+   * Maps the service's live total to a session status. Authorization follows everything received,
+   * mempool included, so checkout can finish while the payment confirms; the webhook captures only
+   * once the service's REQUIRED_CONFIRMATIONS are reached.
+   */
   private async liveStatus(data: ZcashSessionData): Promise<PaymentSessionStatus> {
     const live = await this.client_.status(data.payment_id, data.address)
     if (!live) {
@@ -173,8 +177,28 @@ export class ZcashPaymentProviderService extends AbstractPaymentProvider<ZcashOp
     return { status: await this.liveStatus(data), data }
   }
 
-  /** Funds are already in the merchant's wallet; capture only records it. */
+  /**
+   * Funds are already in the merchant's wallet; capture only records it. A session can be
+   * authorized from unconfirmed funds, so capture (from the webhook or the admin) first checks
+   * that the service sees the full amount with its REQUIRED_CONFIRMATIONS.
+   */
   async capturePayment(input: CapturePaymentInput): Promise<CapturePaymentOutput> {
+    const data = input.data as ZcashSessionData
+    const live = await this.client_.status(data.payment_id, data.address)
+    const total = live ? zecToZat(String(live.total_received ?? "")) : null
+    const confirmed = live && total !== null ? settledZat(live, total) : null
+    if (confirmed === null) {
+      throw new MedusaError(MedusaError.Types.NOT_ALLOWED, "Cannot reach zcash-payment-service to confirm the payment.")
+    }
+    const due = BigInt(data.amount_zat)
+    if (due <= 0n || confirmed < due) {
+      throw new MedusaError(
+        MedusaError.Types.NOT_ALLOWED,
+        total !== null && total >= due
+          ? `Payment of ${zatToZec(total)} ZEC received, pending confirmation. It can be captured once confirmed.`
+          : `Received ${zatToZec(confirmed)} of ${zatToZec(due)} ZEC so far.`
+      )
+    }
     return { data: input.data }
   }
 

@@ -12,6 +12,7 @@
 
 Edge cases the plugin handles:
 
+- **Waiting for confirmations.** When the service sets [`REQUIRED_CONFIRMATIONS`](integration.md#waiting-for-confirmations), the plugin completes the order only once the last `received_by_confirmations` element covers it. A payment seen in the mempool, or with fewer confirmations, adds a *pending confirmation* order note and leaves the order **Pending**; a reorg that undoes those confirmations on a completed order puts it **On hold**. When the service doesn't set `REQUIRED_CONFIRMATIONS`, the array is absent and the plugin uses `total_received` as before.
 - **An order keeps one Zcash address for life.** If the order's total changes after its address was issued, a payment to the old address is noted for you to reconcile rather than completing the order.
 - **Funds drop after payment** (an unconfirmed transaction expires, or a reorg): the order goes **On hold** with a note. The plugin restores it only if it put the order on hold itself.
 - **Payment for a refunded, revoked, failed, or abandoned order** is never completed automatically. Refunding or revoking an order with a Zcash address flags it for review, and later payments to it are left for you until you delete the order's `_zcash_needs_review` meta.
@@ -69,13 +70,14 @@ The service runs on testnet with `ZCASH_DEV_SIMULATED_PAYMENTS=true`, which turn
 - simulates a partial payment and checks the pay page shows it, then simulates the rest;
 - checks that the browser returns to the receipt page and that the order is **Completed** with the full amount recorded;
 - pays a revoked order and checks that the payment is held for review and the order stays revoked;
+- simulates one payment at 0, 1, and 2 confirmations (the stack sets `REQUIRED_CONFIRMATIONS=2`) and checks the order stays **Pending** with a *pending confirmation* note until the last;
 - checks that the webhook route rejects a bad signature with `401` and acknowledges a signed event for an unknown address.
 
 CI runs both on every pull request through `.github/workflows/checks.yml`, which calls `.github/workflows/edd-plugin.yml`, and keeps screenshots of each step as a build artifact.
 
 ### What the tests do not cover
 
-- **The chain.** Simulated payments skip lightwalletd, trial decryption, and confirmations.
+- **The chain.** Simulated payments skip lightwalletd and trial decryption, and their confirmations are simulated rather than mined.
 - **Wallet apps.** Nobody scans the QR code or opens the `zcash:` link in a real wallet.
 - **Other setups.** Only one EDD version, the default theme, and the block checkout are exercised.
 - **Non-ZEC pricing.** The manual exchange rate path has unit tests but no end-to-end run.

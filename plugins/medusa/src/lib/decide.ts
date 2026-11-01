@@ -8,7 +8,7 @@ import { zatToZec } from "./zcash"
 export interface ZcashState {
   /** Highest state_version applied. */
   state_version: number
-  /** Total received at that version, in zatoshis. */
+  /** Confirmed total at that version, in zatoshis. */
   received_zat: string
   /** "auto" while the plugin holds a paid order because its funds dropped. */
   hold?: "auto"
@@ -20,7 +20,10 @@ export interface ZcashState {
 
 export interface DecideInput {
   state: ZcashState
+  /** The confirmed amount: what has the service's REQUIRED_CONFIRMATIONS. */
   totalZat: bigint
+  /** Everything received, mempool included. Defaults to totalZat. */
+  seenZat?: bigint
   stateVersion: number
   dueZat: bigint
   /** The payment was captured (the order is paid). */
@@ -39,6 +42,7 @@ export type Decision =
   | { type: "note"; message: string }
   | { type: "capture" }
   | { type: "partial"; message: string }
+  | { type: "pending"; message: string }
 
 export function decide(i: DecideInput): Decision {
   // Deliveries can arrive out of order. Apply only a newer state_version.
@@ -80,7 +84,14 @@ export function decide(i: DecideInput): Decision {
   if (i.dueZat > 0n && i.totalZat >= i.dueZat) {
     return { type: "capture" }
   }
-  return { type: "partial", message: `Received ${zec} of ${due} ZEC so far.` }
+  const seen = i.seenZat ?? i.totalZat
+  if (i.dueZat > 0n && seen >= i.dueZat) {
+    return {
+      type: "pending",
+      message: `Payment of ${zatToZec(seen)} ZEC received, pending confirmation. It is captured once confirmed.`,
+    }
+  }
+  return { type: "partial", message: `Received ${zatToZec(seen)} of ${due} ZEC so far.` }
 }
 
 /** Reads the plugin's state from session metadata, tolerating anything malformed. */

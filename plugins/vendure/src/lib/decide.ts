@@ -8,17 +8,22 @@ import { zatToZec } from "./zcash"
 export interface ZcashState {
   /** Highest state_version applied. */
   state_version: number
-  /** Total received at that version, in zatoshis. */
+  /** Confirmed total at that version, in zatoshis. */
   received_zat: string
   /** "auto" while the plugin holds a paid order because its funds dropped. */
   hold?: "auto"
+  /** Everything seen at that version, mempool included, in zatoshis. */
+  seen_zat?: string
   /** Set once funds must be reconciled by hand. Later receipts stay in review too. */
   needs_review?: boolean
 }
 
 export interface DecideInput {
   state: ZcashState
+  /** The confirmed amount: what has the service's REQUIRED_CONFIRMATIONS. */
   totalZat: bigint
+  /** Everything received, mempool included. Defaults to totalZat. */
+  seenZat?: bigint
   stateVersion: number
   dueZat: bigint
   /** The payment was settled (the order is paid). */
@@ -35,6 +40,7 @@ export type Decision =
   | { type: "note"; message: string }
   | { type: "capture" }
   | { type: "partial"; message: string }
+  | { type: "pending"; message: string }
 
 export function decide(i: DecideInput): Decision {
   // Deliveries can arrive out of order. Apply only a newer state_version.
@@ -74,7 +80,14 @@ export function decide(i: DecideInput): Decision {
   if (i.dueZat > 0n && i.totalZat >= i.dueZat) {
     return { type: "capture" }
   }
-  return { type: "partial", message: `Received ${zec} of ${due} ZEC so far.` }
+  const seen = i.seenZat ?? i.totalZat
+  if (i.dueZat > 0n && seen >= i.dueZat) {
+    return {
+      type: "pending",
+      message: `Payment of ${zatToZec(seen)} ZEC received, pending confirmation. It is settled once confirmed.`,
+    }
+  }
+  return { type: "partial", message: `Received ${zatToZec(seen)} of ${due} ZEC so far.` }
 }
 
 /** Reads the plugin's state from session metadata, tolerating anything malformed. */
@@ -91,6 +104,9 @@ export function readState(metadata: unknown): ZcashState {
   }
   if (raw?.hold === "auto") {
     state.hold = "auto"
+  }
+  if (typeof raw?.seen_zat === "string" && /^\d+$/.test(raw.seen_zat)) {
+    state.seen_zat = raw.seen_zat
   }
   if (raw?.needs_review === true) {
     state.needs_review = true

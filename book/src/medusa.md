@@ -11,6 +11,7 @@
 
 Edge cases the plugin handles:
 
+- **Waiting for confirmations.** When the service sets [`REQUIRED_CONFIRMATIONS`](integration.md#waiting-for-confirmations), the session is authorized as soon as `total_received` (mempool included) covers it, so checkout can finish, but the plugin captures only once the last `received_by_confirmations` element covers it. A capture from the admin is refused until then too. Until then it logs *pending confirmation*. A reorg that undoes those confirmations after capture sets the hold described below. When the service doesn't set `REQUIRED_CONFIRMATIONS`, the array is absent and the plugin uses `total_received` as before.
 - **Funds drop after capture** (an unconfirmed transaction expires, or a reorg): the plugin sets the order's `zcash_payment_hold` metadata, shows it in the admin widget, and emits `zcash_payment.hold_changed` so your fulfillment code can wait. When the funds return and the service confirms the full total, the hold is cleared. **Releasing a hold never captures again or re-runs order placement or fulfillment.**
 - **Holds you set yourself are kept.** If `zcash_payment_hold` already has a value, the plugin leaves it alone, and it only clears the exact message it wrote.
 - **A payment's amount is fixed once its address is issued.** If the cart total changes, start a new payment session; the old address is not reused or re-priced.
@@ -93,10 +94,11 @@ The service runs on testnet with `ZCASH_DEV_SIMULATED_PAYMENTS=true`, which turn
 - simulates a partial payment, then the rest, and checks the browser returns to the store and the order is captured exactly once;
 - sends signed webhooks for a drop in funds (the order is held), a stale event (ignored), and the recovery (the hold is released with no second capture);
 - pays a canceled order and checks it is flagged for review, not captured;
+- simulates one payment at 0, 1, and 2 confirmations (the stack sets `REQUIRED_CONFIRMATIONS=2`) and checks it is captured only at the last;
 - checks that the webhook rejects a bad signature with `401`, acknowledges an unknown address, and that the service refuses a foreign `return_url`.
 
 CI runs both on every pull request (`.github/workflows/medusa-plugin.yml`) and keeps screenshots, including the admin widget, as a build artifact.
 
 ### What the tests do not cover
 
-- **The chain.** Simulated payments skip lightwalletd, trial decryption, and confirmations. A real testnet payment is still worth doing by hand before a release.
+- **The chain.** Simulated payments skip lightwalletd and trial decryption, and their confirmations are simulated rather than mined. A real testnet payment is still worth doing by hand before a release.

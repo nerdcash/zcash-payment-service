@@ -6,6 +6,7 @@ import {
   minorUnitsToString,
   amountToZat,
   parseObservation,
+  settledZat,
   resolvePayUrl,
   verifySignature,
   zatToZec,
@@ -90,8 +91,15 @@ test("parseObservation", () => {
     address: "utest1abc",
     totalReceived: "0.25000000",
     totalZat: 25_000_000n,
+    settledZat: 25_000_000n,
     stateVersion: 3,
   })
+  const deep = { ...ok, received_by_confirmations: ["0.25000000", "0.25000000", "0.10000000"] }
+  assert.equal(parseObservation(JSON.stringify(deep))?.settledZat, 10_000_000n)
+  assert.equal(parseObservation(JSON.stringify(deep))?.totalZat, 25_000_000n)
+  assert.equal(parseObservation(JSON.stringify({ ...ok, received_by_confirmations: [] })), null)
+  assert.equal(parseObservation(JSON.stringify({ ...ok, received_by_confirmations: ["0.25", 1] })), null)
+  assert.equal(settledZat({ total_received: "1" }, 7n), 7n)
   assert.equal(parseObservation("not json"), null)
   assert.equal(parseObservation("[]"), null)
   assert.equal(parseObservation(JSON.stringify({ ...ok, payment_source: "btc" })), null)
