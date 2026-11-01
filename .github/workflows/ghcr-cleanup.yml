@@ -32,10 +32,12 @@ jobs:
         with:
           owner: nerdcash
           package: zcash-payment-service
-          # Always keep `main`. That digest also carries the newest SHA tag,
-          # so keep-n-tagged counts only older SHA images: 4 yields five SHA
-          # tags total (current plus four older).
-          exclude-tags: main
+          # Always keep `main` and every release image: `v*`, `latest`, and
+          # the plain `<version>` and `<major>.<minor>` tags release.yml adds
+          # (matched by `*.*`; SHA tags never contain a dot). The `main` digest also carries the newest SHA
+          # tag, so keep-n-tagged counts only older SHA images: 4 yields five
+          # SHA tags total (current plus four older).
+          exclude-tags: main,latest,v*,*.*
           keep-n-tagged: 4
           delete-untagged: true
           delete-orphaned-images: true
