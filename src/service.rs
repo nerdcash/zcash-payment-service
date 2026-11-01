@@ -196,10 +196,12 @@ impl PaymentService {
             .clone()
             .filter(|value| !value.trim().is_empty());
         let status = payment_status_for(amount.as_deref(), record.current_total_zat);
+        // After a partial payment, request only what is still owed so rescanning does not overpay.
+        let request_amount = remaining_amount(amount.as_deref(), record.current_total_zat);
         Ok(PaymentStatusResponse {
             qr_text: build_qr_text(
                 &record.unified_address,
-                record.requested_amount.as_deref(),
+                request_amount.as_deref(),
                 record.request_memo.as_deref(),
                 record.request_message.as_deref(),
             ),
@@ -342,6 +344,18 @@ pub fn is_payment_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// The amount still owed, as ZEC text: the requested amount when nothing (or everything) has been
+/// received, otherwise the requested amount minus what was received.
+pub fn remaining_amount(requested: Option<&str>, received_zat: i64) -> Option<String> {
+    let requested_text = requested?;
+    match parse_zec_amount(requested_text) {
+        Some(requested_zat) if received_zat > 0 && received_zat < requested_zat => {
+            Some(format_zat_as_zec(requested_zat - received_zat))
+        }
+        _ => Some(requested_text.to_string()),
+    }
+}
+
 pub fn build_qr_text(
     address: &str,
     amount: Option<&str>,
@@ -461,6 +475,23 @@ mod tests {
             public_base_url: None,
             return_url_allowed_origins: Vec::new(),
         }
+    }
+
+    #[test]
+    fn remaining_amount_subtracts_partial_payments() {
+        assert_eq!(
+            super::remaining_amount(Some("0.5"), 0).as_deref(),
+            Some("0.5")
+        );
+        assert_eq!(
+            super::remaining_amount(Some("0.5"), 20_000_000).as_deref(),
+            Some("0.30000000")
+        );
+        assert_eq!(
+            super::remaining_amount(Some("0.5"), 50_000_000).as_deref(),
+            Some("0.5")
+        );
+        assert_eq!(super::remaining_amount(None, 1), None);
     }
 
     #[test]
