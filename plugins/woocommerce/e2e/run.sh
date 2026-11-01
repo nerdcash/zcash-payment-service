@@ -58,10 +58,13 @@ curl -sf -X POST "$E2E_SERVICE_URL/dev/simulate-payment" -H 'content-type: appli
   --data "{\"address\":\"$late_address\",\"amount\":\"0.5\"}" >/dev/null
 for _ in $(seq 1 30); do
   notes="$(wp eval "foreach (wc_get_order_notes(['order_id' => $late_id]) as \$n) echo \$n->content, PHP_EOL;")"
-  case "$notes" in *"after it was cancelled"*) break ;; esac
+  case "$notes" in *"under manual review"*) break ;; esac
   sleep 2
 done
-echo "$notes" | grep -q "after it was cancelled" || { echo "no late-payment note: $notes"; exit 1; }
+# Cancelling an order with a Zcash address sets its funds aside for review, so the late
+# payment is held there.
+echo "$notes" | grep -q "under manual review" || { echo "no late-payment note: $notes"; exit 1; }
+[ "$(wp eval "echo wc_get_order($late_id)->get_meta('_zcash_needs_review');")" = 1 ] || { echo "late payment not flagged for review"; exit 1; }
 [ "$(wp eval "echo wc_get_order($late_id)->get_status();")" = cancelled ] || { echo "cancelled order was revived"; exit 1; }
 
 echo "--- webhook rejects a bad signature"
