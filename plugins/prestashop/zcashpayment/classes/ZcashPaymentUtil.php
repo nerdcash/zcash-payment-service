@@ -115,10 +115,13 @@ final class ZcashPaymentUtil {
 	/**
 	 * Validates a webhook body and returns its fields, or null.
 	 *
-	 * @return array{event_id:string,address:string,total_received:string,total_zat:int,state_version:int}|null
+	 * `seen_zat` is everything received, mempool included. `total_zat` is the settled amount,
+	 * the one with the service's required confirmations (see ZcashPaymentBalance).
+	 *
+	 * @return array{event_id:string,address:string,total_received:string,total_zat:int,seen_zat:int,state_version:int}|null
 	 */
 	public static function parse_observation( string $raw_body ): ?array {
-		$data = json_decode( $raw_body, true );
+		$data = ZcashPaymentBalance::decode( $raw_body );
 		if ( ! is_array( $data ) ) {
 			return null;
 		}
@@ -134,7 +137,8 @@ final class ZcashPaymentUtil {
 			return null;
 		}
 		$total_zat = ZcashPaymentBalance::from_webhook( $data );
-		if ( null === $total_zat ) {
+		$seen_zat  = ZcashPaymentBalance::seen( $data );
+		if ( null === $total_zat || null === $seen_zat ) {
 			return null;
 		}
 		return array(
@@ -142,6 +146,7 @@ final class ZcashPaymentUtil {
 			'address'        => $data['address'],
 			'total_received' => $data['total_received'],
 			'total_zat'      => $total_zat,
+			'seen_zat'       => $seen_zat,
 			'state_version'  => (int) $m[1],
 		);
 	}

@@ -34,7 +34,7 @@ class ZcashPayment extends PaymentModule {
 	public function __construct() {
 		$this->name                   = 'zcashpayment';
 		$this->tab                    = 'payments_gateways';
-		$this->version                = '0.1.0';
+		$this->version                = '0.2.0';
 		$this->author                 = 'nerdcash';
 		$this->controllers            = array( 'validation', 'webhook' );
 		$this->currencies             = true;
@@ -491,6 +491,7 @@ class ZcashPayment extends PaymentModule {
 				'pay_url'      => is_string( $session['pay_url'] ?? null ) ? $session['pay_url'] : '',
 				'amount_zat'   => $amount_zat,
 				'received_zat' => 0,
+				'seen_zat'     => 0,
 				'priced'       => $priced,
 			)
 		);
@@ -535,7 +536,8 @@ class ZcashPayment extends PaymentModule {
 			return $out . '<p class="zcash-payment-seen">' . $h( $this->l( 'Payment seen. Waiting for confirmation; refresh in a moment.' ) ) . '</p></section>';
 		}
 		$due       = (int) $row['amount_zat'];
-		$received  = ZcashPaymentBalance::from_status( $live ) ?? (int) $row['received_zat'];
+		// Count what the customer has sent, confirmed or not, so they aren't asked to send it again.
+		$received  = ZcashPaymentBalance::seen( $live ) ?? max( (int) $row['seen_zat'], (int) $row['received_zat'] );
 		$remaining = $due - $received;
 		if ( $due > 0 && $remaining <= 0 ) {
 			return $out . '<p class="zcash-payment-seen">' . $h( $this->l( 'Payment received. Waiting for confirmation; refresh in a moment.' ) ) . '</p></section>';

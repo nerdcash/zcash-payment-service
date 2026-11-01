@@ -71,6 +71,38 @@ echo "$late_notes" | grep -q "under manual review" || { echo "no late-payment no
 [ "$(row "$late_id" needs_review)" = 1 ] || { echo "late payment not flagged for review"; exit 1; }
 [ "$(state "$late_id")" = "$cancelled" ] || { echo "cancelled order was revived"; exit 1; }
 
+echo "--- an order is paid only once its payment has REQUIRED_CONFIRMATIONS"
+conf_id="$(E2E_STOP_AT_PAY_PAGE=1 node checkout.mjs | sed -n 's/^ORDER_ID=//p')"
+conf_address="$(row "$conf_id" address)"
+[ -n "$conf_address" ] || { echo "confirmation order has no address"; exit 1; }
+awaiting="$(state "$conf_id")"
+txid="$(printf 'cd%.0s' $(seq 1 32))"
+simulate_depth() {
+  curl -sf -X POST "$E2E_SERVICE_URL/dev/simulate-payment" -H 'content-type: application/json' \
+    --data "{\"address\":\"$conf_address\",\"amount\":\"0.5\",\"txid\":\"$txid\",\"confirmations\":$1}" >/dev/null
+}
+simulate_depth 0
+for _ in $(seq 1 30); do
+  conf_notes="$(notes "$conf_id")"
+  case "$conf_notes" in *"pending confirmation"*) break ;; esac
+  sleep 2
+done
+echo "$conf_notes" | grep -q "pending confirmation" || { echo "no pending-confirmation note: $conf_notes"; exit 1; }
+[ "$(state "$conf_id")" = "$awaiting" ] || { echo "order paid from the mempool"; exit 1; }
+[ "$(row "$conf_id" seen_zat)" = 50000000 ] || { echo "seen amount not recorded"; exit 1; }
+simulate_depth 1
+sleep 6
+[ "$(state "$conf_id")" = "$awaiting" ] || { echo "order paid at 1 of 2 confirmations"; exit 1; }
+[ "$(notes "$conf_id" | grep -c "pending confirmation")" = 1 ] || { echo "pending note repeated"; exit 1; }
+simulate_depth 2
+for _ in $(seq 1 30); do
+  conf_state="$(state "$conf_id")"
+  [ "$conf_state" = "$paid_state" ] && break
+  sleep 2
+done
+[ "$conf_state" = "$paid_state" ] || { echo "confirmed order not paid: $conf_state"; exit 1; }
+[ "$(row "$conf_id" received_zat)" = 50000000 ] || { echo "settled amount not recorded"; exit 1; }
+
 echo "--- webhook rejects a bad signature"
 body='{"event_id":"zcash:1:v9","payment_source":"zcash","address":"x","total_received":"9","observed_at":"2026-01-01T00:00:00Z"}'
 code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$WEBHOOK_URL" \

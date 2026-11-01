@@ -22,6 +22,7 @@ final class ZcashPaymentOrder {
 		'pay_url'        => '',
 		'amount_zat'     => 0,
 		'received_zat'   => 0,
+		'seen_zat'       => 0,
 		'state_version'  => 0,
 		'priced'         => '',
 		'needs_review'   => 0,
@@ -39,6 +40,7 @@ final class ZcashPaymentOrder {
 				`pay_url` TEXT NULL,
 				`amount_zat` BIGINT NOT NULL DEFAULT 0,
 				`received_zat` BIGINT NOT NULL DEFAULT 0,
+				`seen_zat` BIGINT NOT NULL DEFAULT 0,
 				`state_version` BIGINT NOT NULL DEFAULT 0,
 				`priced` VARCHAR(64) NOT NULL DEFAULT \'\',
 				`needs_review` TINYINT(1) NOT NULL DEFAULT 0,
@@ -47,6 +49,17 @@ final class ZcashPaymentOrder {
 				KEY `address` (`address`(191))
 			) ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8mb4'
 		);
+	}
+
+	/** Adds the columns later versions introduced to a table created by an earlier one. */
+	public static function upgrade(): bool {
+		$db     = Db::getInstance();
+		$table  = _DB_PREFIX_ . self::TABLE;
+		$exists = $db->executeS( 'SHOW COLUMNS FROM `' . $table . "` LIKE 'seen_zat'" );
+		if ( ! is_array( $exists ) ) {
+			return false;
+		}
+		return array() !== $exists || $db->execute( 'ALTER TABLE `' . $table . '` ADD `seen_zat` BIGINT NOT NULL DEFAULT 0 AFTER `received_zat`' );
 	}
 
 	/**
