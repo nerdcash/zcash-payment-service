@@ -1,0 +1,9 @@
+{
+  "defaultLanguage": "en",
+  "defaultZone": "Americas",
+  "taxRates": [{ "name": "Standard", "percentage": 0 }],
+  "shippingMethods": [{ "name": "Free shipping", "price": 0 }],
+  "paymentMethods": [{ "name": "Zcash testnet", "handler": { "code": "zcash", "arguments": [] } }],
+  "collections": [],
+  "countries": [{ "name": "United States", "code": "US", "zone": "Americas" }]
+}
