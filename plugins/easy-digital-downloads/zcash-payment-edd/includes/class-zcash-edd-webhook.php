@@ -73,6 +73,10 @@ final class Zcash_EDD_Webhook {
 			return new WP_REST_Response( array( 'error' => 'invalid payload' ), 400 );
 		}
 		$order_id = self::find_order( $observation['address'] );
+		if ( false === $order_id ) {
+			// A database error is not an unknown address: have the service retry.
+			return new WP_REST_Response( array( 'error' => 'lookup failed, retry' ), 503 );
+		}
 		if ( null === $order_id ) {
 			// Not ours (or deleted). Acknowledge so the service stops retrying.
 			return new WP_REST_Response( array( 'ok' => true, 'ignored' => 'unknown address' ), 200 );
@@ -94,7 +98,7 @@ final class Zcash_EDD_Webhook {
 	private static function apply( int $order_id, array $observation ): WP_REST_Response {
 		$g = Zcash_EDD_Gateway::class;
 		// Re-read inside the lock so we see any delivery that finished while we waited.
-		$order = edd_get_order( $order_id );
+		$order = $g::fresh_order( $order_id );
 		if ( ! $order || ! hash_equals( $g::meta( $order_id, $g::META_ADDRESS ), $observation['address'] ) ) {
 			return new WP_REST_Response( array( 'ok' => true, 'ignored' => 'unknown address' ), 200 );
 		}
@@ -173,7 +177,7 @@ final class Zcash_EDD_Webhook {
 				return new WP_REST_Response( array( 'ok' => true, 'ignored' => 'superseded' ), 200 );
 			}
 			// The status request took time: re-read so a change made meanwhile wins.
-			$order    = edd_get_order( $order_id );
+			$order    = $g::fresh_order( $order_id );
 			$pre_hold = $order ? $g::meta( $order_id, $g::META_PRE_HOLD ) : '';
 			$auto     = $order && 'on_hold' === $order->status && $g::meta( $order_id, $g::META_AUTO_HOLD );
 			if ( ! $order || $g::ID !== $order->gateway || $g::meta( $order_id, $g::META_NEEDS_REVIEW )
@@ -231,7 +235,8 @@ final class Zcash_EDD_Webhook {
 	}
 
 	/** Finds the order an address was issued for. */
-	private static function find_order( string $address ): ?int {
+	/** The order holding $address, null if none, or false when the lookup failed. */
+	private static function find_order( string $address ): int|false|null {
 		global $wpdb;
 		$order_id = $wpdb->get_var(
 			$wpdb->prepare(
@@ -240,10 +245,10 @@ final class Zcash_EDD_Webhook {
 				$address
 			)
 		);
-		if ( null === $order_id ) {
-			return null;
+		if ( '' !== $wpdb->last_error ) {
+			return false;
 		}
-		// Never trust the query alone: check the address really matches.
-		return hash_equals( Zcash_EDD_Gateway::meta( (int) $order_id, Zcash_EDD_Gateway::META_ADDRESS ), $address ) ? (int) $order_id : null;
+		// apply() checks the address again under the order's lock.
+		return null === $order_id ? null : (int) $order_id;
 	}
 }

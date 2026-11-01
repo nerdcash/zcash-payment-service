@@ -25,6 +25,26 @@ final class Zcash_EDD_Util {
 		return (int) $whole * self::ZAT_PER_ZEC + (int) $fraction;
 	}
 
+	/** Writes digits times 10^exp as a plain decimal, without rounding. */
+	private static function expand_exponent( string $whole, string $fraction, int $exp ): ?string {
+		$digits = ltrim( $whole . $fraction, '0' );
+		if ( '' === $digits ) {
+			return '0';
+		}
+		$point = strlen( $whole ) + $exp; // Position of the decimal point within $whole . $fraction.
+		$all   = $whole . $fraction;
+		if ( $point <= 0 ) {
+			return '0.' . str_repeat( '0', -$point ) . $all;
+		}
+		if ( $point > 30 ) {
+			return null;
+		}
+		$all = str_pad( $all, $point, '0' );
+		$int = substr( $all, 0, $point );
+		$frac = substr( $all, $point );
+		return ( '' === $int ? '0' : $int ) . ( '' === $frac ? '' : '.' . $frac );
+	}
+
 	/** Formats zatoshis as a ZEC decimal with 8 places. */
 	public static function zat_to_zec( int $zat ): string {
 		$sign = $zat < 0 ? '-' : '';
@@ -44,8 +64,14 @@ final class Zcash_EDD_Util {
 			$total = trim( $total );
 			if ( preg_match( '/^\d*\.\d{8}0+$/', $total ) ) {
 				$total = rtrim( $total, '0' );
-			} elseif ( is_numeric( $total ) && preg_match( '/e/i', $total ) ) {
-				$total = sprintf( '%.8F', (float) $total );
+			} elseif ( preg_match( '/^(\d*)(?:\.(\d*))?e([+-]?\d{1,3})$/i', $total, $m ) ) {
+				$total = self::expand_exponent( $m[1], $m[2] ?? '', (int) $m[3] );
+				if ( null === $total ) {
+					return null;
+				}
+				if ( preg_match( '/^\d*\.\d{8}0+$/', $total ) ) {
+					$total = rtrim( $total, '0' );
+				}
 			}
 			return self::zec_to_zat( $total );
 		}

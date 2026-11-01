@@ -26,6 +26,10 @@ check( 'zec exponent', Zcash_EDD_Util::zec_to_zat( '1e3' ), null );
 check( 'zec huge', Zcash_EDD_Util::zec_to_zat( '99999999999999' ), null );
 check( 'edd total 9 decimals', Zcash_EDD_Util::order_total_to_zat( '0.500000000', 'ZEC', '' ), 50000000 );
 check( 'edd total sub-zat', Zcash_EDD_Util::order_total_to_zat( '0.123456789', 'ZEC', '' ), null );
+check( 'edd total exponent', Zcash_EDD_Util::order_total_to_zat( '5.0E-1', 'ZEC', '' ), 50000000 );
+check( 'edd total tiny exponent', Zcash_EDD_Util::order_total_to_zat( '1e-9', 'ZEC', '' ), null );
+check( 'edd total 1e-8', Zcash_EDD_Util::order_total_to_zat( '1.0E-8', 'ZEC', '' ), 1 );
+check( 'edd total 2e3', Zcash_EDD_Util::order_total_to_zat( '2e3', 'ZEC', '' ), 200000000000 );
 
 check( 'fmt', Zcash_EDD_Util::zat_to_zec( 12345678 ), '0.12345678' );
 check( 'fmt whole', Zcash_EDD_Util::zat_to_zec( 250000000 ), '2.50000000' );

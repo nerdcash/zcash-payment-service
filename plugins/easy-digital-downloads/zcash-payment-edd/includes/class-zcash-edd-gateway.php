@@ -126,6 +126,16 @@ final class Zcash_EDD_Gateway {
 		echo '<p class="zcash-checkout-description">' . esc_html__( 'Pay privately with shielded Zcash. After you place the order you will see a QR code to scan with your wallet.', 'zcash-payment-edd' ) . '</p>';
 	}
 
+	/**
+	 * Reads an order past WordPress's request-local caches, so a change another request made
+	 * meanwhile (a merchant's hold or revocation, another webhook delivery) is seen.
+	 */
+	public static function fresh_order( int $order_id ) {
+		wp_cache_delete( $order_id, 'edd-orders' );
+		wp_cache_delete( $order_id, 'edd_order_meta' );
+		return edd_get_order( $order_id );
+	}
+
 	public static function meta( int $order_id, string $key ): string {
 		return (string) edd_get_order_meta( $order_id, $key, true );
 	}
@@ -197,8 +207,11 @@ final class Zcash_EDD_Gateway {
 
 		$result = self::start_session( (int) $order_id );
 		if ( is_wp_error( $result ) ) {
-			// No address was issued for this order, so nothing can be paid to it.
-			if ( '' === self::meta( (int) $order_id, self::META_ADDRESS ) ) {
+			// Fail the order only if it is still an open Zcash order with no address, so nothing
+			// can be paid to it; a status someone else set meanwhile is kept.
+			$order = self::fresh_order( (int) $order_id );
+			if ( $order && self::ID === $order->gateway && in_array( $order->status, self::OPEN_STATUSES, true )
+				&& '' === self::meta( (int) $order_id, self::META_ADDRESS ) ) {
 				edd_update_order_status( $order_id, 'failed' );
 			}
 			edd_set_error( 'zcash_session', $result->get_error_message() );
@@ -295,7 +308,7 @@ final class Zcash_EDD_Gateway {
 
 		// The request took time and the lock only covers this plugin: re-read, and give up if
 		// the order was closed, paid, or repriced meanwhile. The new address stays unused.
-		$order = edd_get_order( $order_id );
+		$order = self::fresh_order( $order_id );
 		if ( ! $order || ! in_array( $order->status, self::OPEN_STATUSES, true ) || self::ID !== $order->gateway || self::priced( $order ) !== $priced ) {
 			return new WP_Error( 'zcash_changed', __( 'This order changed while payment was starting. Please try again or contact the store.', 'zcash-payment-edd' ) );
 		}
