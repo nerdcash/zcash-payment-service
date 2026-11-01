@@ -232,16 +232,34 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 		if ( '' === $address ) {
 			return;
 		}
-		$due       = (int) $order->get_meta( self::META_AMOUNT_ZAT );
-		$received  = (int) $order->get_meta( self::META_RECEIVED_ZAT );
-		$remaining = $due - $received;
 		echo '<section class="zcash-payment-details"><h2>' . esc_html__( 'Pay with Zcash', 'zcash-payment-gateway' ) . '</h2>';
-		if ( $due > 0 && $remaining <= 0 ) {
-			echo '<p>' . esc_html__( 'Payment received. Waiting for confirmation; this page will show the order as paid shortly.', 'zcash-payment-gateway' ) . '</p></section>';
+		// Payments sent now would only be set aside by the webhook, so don't ask for one.
+		if ( $order->get_meta( self::META_NEEDS_REVIEW )
+			|| (string) $order->get_meta( self::META_PRICED ) !== $order->get_total() . ' ' . $order->get_currency() ) {
+			echo '<p>' . esc_html__( 'This payment needs review by the store. Please contact the store before sending anything.', 'zcash-payment-gateway' ) . '</p></section>';
 			return;
 		}
-		if ( $this->service_reports_paid( $order ) ) {
-			echo '<p>' . esc_html__( 'Payment seen. Waiting for confirmation; refresh in a moment.', 'zcash-payment-gateway' ) . '</p></section>';
+		$due      = (int) $order->get_meta( self::META_AMOUNT_ZAT );
+		$received = (int) $order->get_meta( self::META_RECEIVED_ZAT );
+		// The service's view is newer than ours while a webhook is queued or retrying.
+		$live = $this->service_status( $order );
+		if ( null !== $live ) {
+			if ( in_array( $live['status'] ?? '', array( 'paid', 'received' ), true ) ) {
+				echo '<p>' . esc_html__( 'Payment seen. Waiting for confirmation; refresh in a moment.', 'zcash-payment-gateway' ) . '</p></section>';
+				return;
+			}
+			$live_zat = Zcash_PG_Util::zec_to_zat( (string) ( $live['total_received'] ?? '' ) );
+			if ( null !== $live_zat ) {
+				$received = $live_zat;
+			}
+			if ( ! empty( $live['qr_text'] ) && is_string( $live['qr_text'] ) ) {
+				// After a partial payment the service's request asks only for the rest.
+				$qr_text = $live['qr_text'];
+			}
+		}
+		$remaining = $due - $received;
+		if ( $due > 0 && $remaining <= 0 ) {
+			echo '<p>' . esc_html__( 'Payment received. Waiting for confirmation; this page will show the order as paid shortly.', 'zcash-payment-gateway' ) . '</p></section>';
 			return;
 		}
 		echo '<p>' . esc_html(
@@ -253,7 +271,7 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 		) . '</p>';
 		echo '<p style="word-break:break-all"><code>' . esc_html( $address ) . '</code></p>';
 		if ( '' !== $qr_text ) {
-			$uri = $received > 0 ? 'zcash:' . $address . '?amount=' . rtrim( rtrim( Zcash_PG_Util::zat_to_zec( $remaining ), '0' ), '.' ) : $qr_text;
+			$uri = ( $received > 0 && null === $live ) ? 'zcash:' . $address . '?amount=' . rtrim( rtrim( Zcash_PG_Util::zat_to_zec( $remaining ), '0' ), '.' ) : $qr_text;
 			echo '<p><a class="button" href="' . esc_attr( $uri ) . '">' . esc_html__( 'Open in wallet', 'zcash-payment-gateway' ) . '</a></p>';
 		}
 		$public = $this->public_pay_url( $pay_url );
@@ -272,18 +290,19 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 		return Zcash_PG_Util::resolve_pay_url( $pay_url, (string) $this->get_option( 'pay_base_url' ) );
 	}
 
-	/** Asks the service whether the payment is already covered (its webhook may not have arrived). */
-	private function service_reports_paid( WC_Order $order ): bool {
+	/** The service's current status for this order's payment link, or null if unavailable. */
+	private function service_status( WC_Order $order ): ?array {
 		$payment_id = (string) $order->get_meta( self::META_PAYMENT_ID );
 		if ( '' === $payment_id || ! ctype_xdigit( $payment_id ) ) {
-			return false;
+			return null;
 		}
 		$response = wp_remote_get( $this->service_endpoint( '/payments/' . $payment_id ), array( 'timeout' => 5 ) );
 		if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
-			return false;
+			return null;
 		}
 		$body = json_decode( (string) wp_remote_retrieve_body( $response ), true );
-		return is_array( $body ) && in_array( $body['status'] ?? '', array( 'paid', 'received' ), true );
+		// Only trust the service's view for this order's own address.
+		return is_array( $body ) && hash_equals( (string) $order->get_meta( self::META_ADDRESS ), (string) ( $body['address'] ?? '' ) ) ? $body : null;
 	}
 
 	private function service_endpoint( string $path ): string {

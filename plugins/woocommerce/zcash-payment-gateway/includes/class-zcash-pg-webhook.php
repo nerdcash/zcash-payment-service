@@ -134,6 +134,8 @@ final class Zcash_PG_Webhook {
 			);
 			wc_get_logger()->warning( 'Order ' . $order->get_id() . ': ' . $message, array( 'source' => Zcash_PG_Gateway::ID ) );
 			$order->add_order_note( $message );
+			// Keep these funds in review even if the order is reopened later.
+			$order->update_meta_data( Zcash_PG_Gateway::META_NEEDS_REVIEW, '1' );
 		} elseif ( $due > 0 && $total >= $due ) {
 			$order->update_meta_data( Zcash_PG_Gateway::META_RECEIVED_ZAT, (string) $total );
 			$order->save();

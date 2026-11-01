@@ -62,6 +62,8 @@ try {
 
   await simulate(status.address, '0.2');
   await page.locator('#status[data-status="partially_paid"]').waitFor();
+  // The page reloads with a request for only the rest, so rescanning cannot overpay.
+  await page.locator('a.button[href*="amount=0.3"]').waitFor({ timeout: 20000 });
   await shot('3-partially-paid');
   console.log('partial payment shown on pay page');
 

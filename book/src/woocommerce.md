@@ -58,6 +58,7 @@ php plugins/woocommerce/tests/unit.php
 
 ```sh
 cd plugins/woocommerce/e2e
+npx playwright install --with-deps chromium   # once per machine, after npm ci
 ./run.sh                 # KEEP_STACK=1 leaves it running on http://localhost:8080
 ```
 
