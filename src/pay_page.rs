@@ -56,6 +56,16 @@ pub fn render_pay_page(status: &PaymentStatusResponse) -> Result<String, AppErro
     let qr = qr_svg(&status.qr_text).unwrap_or_else(|_| {
         r#"<p class="message">The payment request is too long for a QR code. Use the wallet link or copy the address below.</p>"#.to_string()
     });
+    // A settled link offers nothing more to pay, so a reload never shows a new request.
+    let controls = if matches!(status.status, PaymentStatus::Paid | PaymentStatus::Received) {
+        String::new()
+    } else {
+        format!(
+            r#"<div class="qr" aria-label="QR code for the payment request">{qr}</div>
+<p><a class="button" href="{uri}">Open in wallet</a></p>"#,
+            uri = escape_html(&status.qr_text),
+        )
+    };
     let title = status.label.as_deref().unwrap_or("Pay with Zcash");
     let remaining = status.amount.as_deref().and_then(|amount| {
         let received = crate::service::parse_zec_amount(&status.total_received).unwrap_or(0);
@@ -119,8 +129,7 @@ h1 {{ font-size: 1.25rem; margin: 0 0 .5rem; }}
 <h1>{title}</h1>
 {amount}
 {message}
-<div class="qr" aria-label="QR code for the payment request">{qr}</div>
-<p><a class="button" href="{uri}">Open in wallet</a></p>
+{controls}
 <p class="address">{address}</p>
 <p id="status" data-status="{status_key}" role="status" aria-live="polite">{status_text}</p>
 <p id="total"></p>
@@ -141,6 +150,9 @@ h1 {{ font-size: 1.25rem; margin: 0 0 .5rem; }}
     statusEl.dataset.status = s;
     statusEl.textContent = labels[s] || s;
     totalEl.textContent = total && Number(total) > 0 ? "Received so far: " + total + " ZEC" : "";
+    if (s === "paid" || s === "received") {{
+      document.querySelectorAll(".qr, a.button").forEach((el) => el.remove());
+    }}
   }};
   // Stop polling only when leaving for the return URL. Otherwise keep the shown state current,
   // since an unconfirmed receipt can still be dropped.
@@ -157,7 +169,7 @@ h1 {{ font-size: 1.25rem; margin: 0 0 .5rem; }}
         if (done(body.status)) {{ finish(); return; }}
         // The request changes after a partial payment (it asks only for the rest). Reload so
         // the QR code and wallet link never ask for more than is still owed.
-        if (body.qr_text && body.qr_text !== data.qrText) {{ window.location.reload(); return; }}
+        if (body.status === "partially_paid" && body.qr_text && body.qr_text !== data.qrText) {{ window.location.reload(); return; }}
       }}
     }} catch (e) {{ /* keep polling */ }}
     setTimeout(poll, 3000);
@@ -171,8 +183,7 @@ h1 {{ font-size: 1.25rem; margin: 0 0 .5rem; }}
         title = escape_html(title),
         amount = amount,
         message = message,
-        qr = qr,
-        uri = escape_html(&status.qr_text),
+        controls = controls,
         address = escape_html(&status.address),
         status_key = status_key(status.status),
         status_text = status_text(status.status),
@@ -235,6 +246,48 @@ mod tests {
         let html = super::render_pay_page(&status).unwrap();
         assert!(html.contains("too long for a QR code"));
         assert!(html.contains("utest1example"));
+    }
+
+    fn status_with(
+        status: crate::service::PaymentStatus,
+        total: &str,
+    ) -> crate::service::PaymentStatusResponse {
+        crate::service::PaymentStatusResponse {
+            payment_id: "0".repeat(32),
+            address: "utest1example".into(),
+            qr_text: "zcash:utest1example?amount=0.30000000".into(),
+            pay_url: "/pay/x".into(),
+            label: None,
+            message: None,
+            amount: Some("0.5".into()),
+            total_received: total.into(),
+            state_version: 1,
+            status,
+            return_url: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn partial_payment_leads_with_the_remaining_amount() {
+        let html = super::render_pay_page(&status_with(
+            crate::service::PaymentStatus::PartiallyPaid,
+            "0.20000000",
+        ))
+        .unwrap();
+        assert!(html.contains("0.30000000</span> ZEC remaining"));
+        assert!(html.contains("Open in wallet"));
+    }
+
+    #[test]
+    fn settled_link_offers_no_payment_controls() {
+        let html = super::render_pay_page(&status_with(
+            crate::service::PaymentStatus::Paid,
+            "0.50000000",
+        ))
+        .unwrap();
+        assert!(!html.contains("Open in wallet"));
+        assert!(!html.contains("<svg"));
     }
 
     #[test]
