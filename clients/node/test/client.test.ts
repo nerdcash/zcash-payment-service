@@ -50,7 +50,25 @@ describe("createPaymentSession", () => {
       memo: null,
       message: null,
       amount: "0.05000000",
+      return_url: null,
     });
+  });
+
+  it("sends returnUrl and returns the pay page fields", async () => {
+    const calls: Call[] = [];
+    const id = "0123456789abcdef0123456789abcdef";
+    const client = createZcashPaymentClient({
+      baseUrl: "http://service.test",
+      webhookSecret: SECRET,
+      fetchImpl: fakeFetch(
+        200,
+        JSON.stringify({ address: "u1abc", qr_text: "zcash:u1abc", payment_id: id, pay_url: `/pay/${id}` }),
+        calls,
+      ),
+    });
+    const session = await client.createPaymentSession({ amount: "1", returnUrl: "https://shop.test/done" });
+    assert.deepEqual(session, { address: "u1abc", qr_text: "zcash:u1abc", payment_id: id, pay_url: `/pay/${id}` });
+    assert.equal(JSON.parse(String(calls[0]?.init?.body)).return_url, "https://shop.test/done");
   });
 
   it("surfaces the service's error message and status", async () => {
@@ -142,5 +160,66 @@ describe("verifyWebhook", () => {
     ]) {
       assert.throws(() => client.verifyWebhook(Buffer.from(body), sign(body)), WebhookPayloadError);
     }
+  });
+});
+
+describe("getPayment", () => {
+  const id = "0123456789abcdef0123456789abcdef";
+  const status = {
+    payment_id: id,
+    address: "u1abc",
+    qr_text: "zcash:u1abc?amount=0.5",
+    pay_url: `/pay/${id}`,
+    label: "Order 1",
+    message: null,
+    amount: "0.5",
+    total_received: "0.20000000",
+    state_version: 1,
+    status: "partially_paid",
+    return_url: null,
+    created_at: "2026-10-31T00:00:00Z",
+  };
+
+  it("reads the status route", async () => {
+    const calls: Call[] = [];
+    const client = createZcashPaymentClient({
+      baseUrl: "http://service.test/x",
+      webhookSecret: SECRET,
+      fetchImpl: fakeFetch(200, JSON.stringify(status), calls),
+    });
+    assert.deepEqual(await client.getPayment(id), status);
+    assert.equal(calls[0]?.url, `http://service.test/payments/${id}`);
+    assert.equal(calls[0]?.init?.method, "GET");
+  });
+
+  it("rejects malformed ids without calling the service", async () => {
+    const calls: Call[] = [];
+    const client = createZcashPaymentClient({
+      baseUrl: "http://service.test",
+      webhookSecret: SECRET,
+      fetchImpl: fakeFetch(200, "{}", calls),
+    });
+    await assert.rejects(client.getPayment("../health"), PaymentServiceError);
+    assert.equal(calls.length, 0);
+  });
+
+  it("maps 404 and unexpected payloads to PaymentServiceError", async () => {
+    const missing = createZcashPaymentClient({
+      baseUrl: "http://service.test",
+      webhookSecret: SECRET,
+      fetchImpl: fakeFetch(404, JSON.stringify({ error: "not found: unknown payment" })),
+    });
+    await assert.rejects(missing.getPayment(id), (error: unknown) => {
+      assert.ok(error instanceof PaymentServiceError);
+      assert.equal(error.status, 404);
+      assert.equal(error.message, "not found: unknown payment");
+      return true;
+    });
+    const odd = createZcashPaymentClient({
+      baseUrl: "http://service.test",
+      webhookSecret: SECRET,
+      fetchImpl: fakeFetch(200, JSON.stringify({ ...status, status: "maybe" })),
+    });
+    await assert.rejects(odd.getPayment(id), PaymentServiceError);
   });
 });

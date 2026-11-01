@@ -47,6 +47,20 @@ pub struct ServiceMetadata {
     pub finality_confirmations: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaymentLinkRecord {
+    pub payment_id: String,
+    pub unified_address: String,
+    pub request_label: Option<String>,
+    pub request_memo: Option<String>,
+    pub request_message: Option<String>,
+    pub requested_amount: Option<String>,
+    pub return_url: Option<String>,
+    pub created_at: String,
+    pub current_total_zat: i64,
+    pub state_version: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IssuedAddressRecord {
     pub address_id: i64,
@@ -586,6 +600,50 @@ impl AppDb {
 
         tx.commit()?;
         Ok(record)
+    }
+
+    /// Records the public payment id that the pay page and status route use for an issued address.
+    pub fn insert_payment_link(
+        &self,
+        payment_id: &str,
+        address_id: i64,
+        return_url: Option<&str>,
+    ) -> Result<(), AppError> {
+        let created_at = now_rfc3339()?;
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO payment_links (payment_id, address_id, return_url, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![payment_id, address_id, return_url, created_at],
+        )?;
+        Ok(())
+    }
+
+    /// Loads a payment link with the request details and the address's current eligible total.
+    pub fn find_payment_link(
+        &self,
+        payment_id: &str,
+    ) -> Result<Option<PaymentLinkRecord>, AppError> {
+        let conn = self.connect()?;
+        conn.query_row(
+            "SELECT payment_links.payment_id, issued_addresses.unified_address, issued_addresses.request_label, issued_addresses.request_memo, issued_addresses.request_message, issued_addresses.requested_amount, payment_links.return_url, payment_links.created_at, address_totals.current_total_zat, address_totals.state_version FROM payment_links INNER JOIN issued_addresses ON issued_addresses.address_id = payment_links.address_id INNER JOIN address_totals ON address_totals.address_id = payment_links.address_id WHERE payment_links.payment_id = ?1",
+            params![payment_id],
+            |row| {
+                Ok(PaymentLinkRecord {
+                    payment_id: row.get(0)?,
+                    unified_address: row.get(1)?,
+                    request_label: row.get(2)?,
+                    request_memo: row.get(3)?,
+                    request_message: row.get(4)?,
+                    requested_amount: row.get(5)?,
+                    return_url: row.get(6)?,
+                    created_at: row.get(7)?,
+                    current_total_zat: row.get(8)?,
+                    state_version: row.get(9)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(AppError::from)
     }
 
     pub fn latest_diversifier_index_be(&self) -> Result<Option<Vec<u8>>, AppError> {
@@ -1490,6 +1548,13 @@ impl AppDb {
             );
             CREATE INDEX IF NOT EXISTS issued_addresses_created_at_idx ON issued_addresses (created_at);
 
+            CREATE TABLE IF NOT EXISTS payment_links (
+                payment_id TEXT PRIMARY KEY,
+                address_id INTEGER NOT NULL UNIQUE REFERENCES issued_addresses(address_id) ON DELETE CASCADE,
+                return_url TEXT,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS address_receivers (
                 receiver_id INTEGER PRIMARY KEY,
                 address_id INTEGER NOT NULL REFERENCES issued_addresses(address_id) ON DELETE CASCADE,
@@ -1928,7 +1993,7 @@ fn mempool_fresh_cutoff(now: &str) -> Result<String, AppError> {
     Ok(cutoff.format(&Rfc3339)?)
 }
 
-fn format_zat_as_zec(value_zat: i64) -> String {
+pub fn format_zat_as_zec(value_zat: i64) -> String {
     let sign = if value_zat < 0 { "-" } else { "" };
     let absolute = value_zat.unsigned_abs();
     let whole = absolute / 100_000_000;
@@ -2129,6 +2194,7 @@ mod tests {
             webhook_max_attempts: 8,
             webhook_report_confirmations: 1,
             finality_confirmations: 100,
+            public_base_url: None,
         }
     }
 

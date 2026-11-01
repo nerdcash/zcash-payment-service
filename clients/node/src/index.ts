@@ -17,12 +17,37 @@ export type PaymentSessionRequest = {
   memo?: string;
   message?: string;
   amount?: string;
+  /** Absolute http(s) URL the hosted pay page sends the payer to once paid. */
+  returnUrl?: string;
 };
 
 export type PaymentSession = {
   address: string;
   qr_text: string;
+  /** Id of the hosted pay page. Absent when the service predates payment links. */
+  payment_id?: string;
+  /** Link to the hosted pay page. Absent when the service predates payment links. */
+  pay_url?: string;
 };
+
+export type PaymentStatusValue = "awaiting_payment" | "partially_paid" | "paid" | "received";
+
+export type PaymentStatus = {
+  payment_id: string;
+  address: string;
+  qr_text: string;
+  pay_url: string;
+  label: string | null;
+  message: string | null;
+  amount: string | null;
+  total_received: string;
+  state_version: number;
+  status: PaymentStatusValue;
+  return_url: string | null;
+  created_at: string;
+};
+
+const PAYMENT_STATUSES: readonly string[] = ["awaiting_payment", "partially_paid", "paid", "received"];
 
 export type PaymentObservation = {
   event_id: string;
@@ -58,6 +83,11 @@ export class WebhookPayloadError extends Error {
 
 export type ZcashPaymentClient = {
   createPaymentSession(request: PaymentSessionRequest): Promise<PaymentSession>;
+  /**
+   * Reads a payment link's status. For display only: mark orders paid from the signed webhook.
+   * Requires a service with payment links.
+   */
+  getPayment(paymentId: string): Promise<PaymentStatus>;
   verifyWebhook(rawBody: Uint8Array, signature: string | undefined): PaymentObservation;
 };
 
@@ -68,7 +98,7 @@ export type ZcashPaymentClientOptions = {
   webhookSecret: string;
   /** Optional fetch implementation, for tests or custom transports. */
   fetchImpl?: typeof fetch;
-  /** Request timeout in milliseconds for createPaymentSession. Defaults to 10000. */
+  /** Request timeout in milliseconds for service calls. Defaults to 10000. */
   timeoutMs?: number;
 };
 
@@ -94,6 +124,7 @@ export function createZcashPaymentClient(options: ZcashPaymentClientOptions): Zc
             memo: request.memo ?? null,
             message: request.message ?? null,
             amount: request.amount ?? null,
+            return_url: request.returnUrl ?? null,
           }),
           signal: AbortSignal.timeout(options.timeoutMs ?? 10_000),
         });
@@ -115,7 +146,37 @@ export function createZcashPaymentClient(options: ZcashPaymentClientOptions): Zc
         throw new PaymentServiceError("payment service returned an unexpected payload", response.status);
       }
 
-      return { address: payload.address, qr_text: payload.qr_text };
+      const session: PaymentSession = { address: payload.address, qr_text: payload.qr_text };
+      if (typeof payload.payment_id === "string" && /^[0-9a-f]{32}$/.test(payload.payment_id)) {
+        session.payment_id = payload.payment_id;
+      }
+      if (typeof payload.pay_url === "string" && payload.pay_url.length > 0 && payload.pay_url.length <= 2048) {
+        session.pay_url = payload.pay_url;
+      }
+      return session;
+    },
+
+    async getPayment(paymentId) {
+      if (!/^[0-9a-f]{32}$/.test(paymentId)) {
+        throw new PaymentServiceError("payment id must be 32 lowercase hex characters", 0);
+      }
+      let response: Response;
+      try {
+        response = await fetchImpl(serviceUrl(baseUrl, `/payments/${paymentId}`), {
+          method: "GET",
+          headers: { accept: "application/json" },
+          signal: AbortSignal.timeout(options.timeoutMs ?? 10_000),
+        });
+      } catch {
+        throw new PaymentServiceError("payment service is unreachable", 0);
+      }
+
+      const payload = await readBody(response);
+      const status = parsePaymentStatus(payload);
+      if (!status) {
+        throw new PaymentServiceError("payment service returned an unexpected payload", response.status);
+      }
+      return status;
     },
 
     verifyWebhook(rawBody, signature) {
@@ -198,6 +259,47 @@ function parseObservation(rawBody: Uint8Array): PaymentObservation {
     address,
     total_received: totalReceived,
     observed_at: observedAt,
+  };
+}
+
+function parsePaymentStatus(value: unknown): PaymentStatus | null {
+  if (!isRecord(value)) return null;
+  const str = (key: string) => (typeof value[key] === "string" ? (value[key] as string) : null);
+  const nullableStr = (key: string): string | null | undefined =>
+    value[key] === null ? null : typeof value[key] === "string" ? (value[key] as string) : undefined;
+  const paymentId = str("payment_id");
+  const address = str("address");
+  const qrText = str("qr_text");
+  const payUrl = str("pay_url");
+  const totalReceived = str("total_received");
+  const createdAt = str("created_at");
+  const status = str("status");
+  const label = nullableStr("label");
+  const message = nullableStr("message");
+  const amount = nullableStr("amount");
+  const returnUrl = nullableStr("return_url");
+  const stateVersion = value.state_version;
+  if (
+    !paymentId || !address || !qrText || !payUrl || !totalReceived || !createdAt ||
+    !status || !PAYMENT_STATUSES.includes(status) ||
+    label === undefined || message === undefined || amount === undefined || returnUrl === undefined ||
+    typeof stateVersion !== "number" || !Number.isInteger(stateVersion)
+  ) {
+    return null;
+  }
+  return {
+    payment_id: paymentId,
+    address,
+    qr_text: qrText,
+    pay_url: payUrl,
+    label,
+    message,
+    amount,
+    total_received: totalReceived,
+    state_version: stateVersion,
+    status: status as PaymentStatusValue,
+    return_url: returnUrl,
+    created_at: createdAt,
   };
 }
 

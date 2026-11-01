@@ -36,6 +36,8 @@ pub struct Config {
     pub webhook_max_attempts: u32,
     pub webhook_report_confirmations: u32,
     pub finality_confirmations: u32,
+    /// Public origin (and optional path prefix) where payers reach the pay page.
+    pub public_base_url: Option<String>,
 }
 
 impl Config {
@@ -86,6 +88,14 @@ impl Config {
             .filter(|value| !value.is_empty());
         if let Some(webhook_url) = webhook_url.as_deref() {
             validate_webhook_url(webhook_url)?;
+        }
+        let public_base_url = env::var("PUBLIC_BASE_URL")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(public_base_url) = public_base_url.as_deref() {
+            validate_http_url("PUBLIC_BASE_URL", public_base_url)
+                .map_err(AppError::InvalidConfig)?;
         }
         let webhook_secret = env::var("ZCASH_WEBHOOK_SECRET")
             .ok()
@@ -265,6 +275,7 @@ impl Config {
             webhook_max_attempts,
             webhook_report_confirmations,
             finality_confirmations,
+            public_base_url,
         })
     }
 }
@@ -292,28 +303,26 @@ fn parse_scan_parallelism(value: Option<&str>, default: usize) -> Result<usize, 
 }
 
 fn validate_webhook_url(webhook_url: &str) -> Result<(), AppError> {
-    let uri = webhook_url.parse::<Uri>().map_err(|error| {
-        AppError::InvalidConfig(format!(
-            "ZCASH_WEBHOOK_URL must be a valid absolute http(s) URL; got {webhook_url}: {error}"
-        ))
+    validate_http_url("ZCASH_WEBHOOK_URL", webhook_url).map_err(AppError::InvalidConfig)
+}
+
+/// Checks that `value` is an absolute `http` or `https` URL with a host.
+/// The error text names the setting or field so it can be reported as-is.
+pub fn validate_http_url(name: &str, value: &str) -> Result<(), String> {
+    let uri = value.parse::<Uri>().map_err(|error| {
+        format!("{name} must be a valid absolute http(s) URL; got {value}: {error}")
     })?;
 
-    let scheme = uri.scheme_str().ok_or_else(|| {
-        AppError::InvalidConfig(format!(
-            "ZCASH_WEBHOOK_URL must be an absolute http(s) URL; got {webhook_url}"
-        ))
-    })?;
+    let scheme = uri
+        .scheme_str()
+        .ok_or_else(|| format!("{name} must be an absolute http(s) URL; got {value}"))?;
 
     if scheme != "http" && scheme != "https" {
-        return Err(AppError::InvalidConfig(format!(
-            "ZCASH_WEBHOOK_URL must use http or https; got {webhook_url}"
-        )));
+        return Err(format!("{name} must use http or https; got {value}"));
     }
 
     if uri.authority().is_none() {
-        return Err(AppError::InvalidConfig(format!(
-            "ZCASH_WEBHOOK_URL must include a host; got {webhook_url}"
-        )));
+        return Err(format!("{name} must include a host; got {value}"));
     }
 
     Ok(())

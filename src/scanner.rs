@@ -1287,6 +1287,7 @@ mod tests {
             webhook_max_attempts: 8,
             webhook_report_confirmations: 0,
             finality_confirmations: 100,
+            public_base_url: None,
         }
     }
 

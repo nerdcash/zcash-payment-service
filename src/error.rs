@@ -12,6 +12,8 @@ pub enum AppError {
     InvalidConfig(String),
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+    #[error("not found: {0}")]
+    NotFound(String),
     #[error("startup integrity check failed: {0}")]
     StartupIntegrity(String),
     #[error("wallet error: {0}")]
@@ -41,6 +43,7 @@ impl IntoResponse for AppError {
             AppError::InvalidConfig(_)
             | AppError::InvalidRequest(_)
             | AppError::StartupIntegrity(_) => StatusCode::BAD_REQUEST,
+            AppError::NotFound(_) => StatusCode::NOT_FOUND,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
 

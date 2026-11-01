@@ -6,12 +6,14 @@ The crate depends on axum 0.8.9. Where a failure comes from axum's `Json` extrac
 
 ## HTTP
 
-`build_router` registers two routes and no middleware:
+`build_router` registers four routes and no middleware:
 
 | Method | Path | Handler |
 | --- | --- | --- |
 | `GET` | `/health` | `service::health` |
 | `POST` | `/payment-session` | `service::payment_session` |
+| `GET` | `/payments/{payment_id}` | `service::payment_status` |
+| `GET` | `/pay/{payment_id}` | `pay_page::pay_page` (HTML) |
 
 Handlers that return `AppError` respond with JSON:
 
@@ -23,6 +25,7 @@ Handlers that return `AppError` respond with JSON:
 | --- | --- | --- |
 | `InvalidConfig` | 400 | `invalid configuration: ` |
 | `InvalidRequest` | 400 | `invalid request: ` |
+| `NotFound` | 404 | `not found: ` |
 | `StartupIntegrity` | 400 | `startup integrity check failed: ` |
 | `Wallet` | 500 | `wallet error: ` |
 | `Database` | 500 | `database error: ` |
@@ -79,7 +82,8 @@ Body JSON, content type `application/json` (a subtype with a `+json` suffix is a
 | `label` | `Option<String>` | no | Stored on the issued address. |
 | `memo` | `Option<String>` | no | Stored, and copied into `qr_text` when non-blank. |
 | `message` | `Option<String>` | no | Stored, and copied into `qr_text` when non-blank. |
-| `amount` | `Option<String>` | no | Stored as text, and copied into `qr_text` when non-blank. It is not parsed. |
+| `amount` | `Option<String>` | no | Stored as text, and copied into `qr_text` when non-blank. Only the pay page status parses it (see [Payment links](pay-page.md#status)). |
+| `return_url` | `Option<String>` | no | Absolute `http(s)` URL the [pay page](pay-page.md) returns the payer to once paid. Blank is treated as unset. |
 
 Unknown JSON fields are ignored. A missing `payment_source`, or a value of the wrong JSON type, never reaches the handler.
 
@@ -89,6 +93,7 @@ Unknown JSON fields are ignored. A missing `payment_source`, or a value of the w
 | JSON syntax is invalid | 400 | plain text starting with `Failed to parse the request body as JSON` |
 | JSON does not match the struct | 422 | plain text starting with `Failed to deserialize the JSON body into the target type` |
 | `payment_source` is not `zcash` | 400 | `{"error":"invalid request: payment_source must be 'zcash'"}` |
+| `return_url` is not an absolute `http(s)` URL | 400 | `{"error":"invalid request: return_url must ..."}` |
 | Address derivation or the database fails | 500 | `{"error":"wallet error: ..."}` or `{"error":"database error: ..."}` |
 
 Success is `200` and `PaymentSessionResponse`:
@@ -97,6 +102,8 @@ Success is `200` and `PaymentSessionResponse`:
 | --- | --- |
 | `address` | Newly derived unified address. Each successful call returns a different one. The test `fresh_addresses_are_real_unified_addresses` expects the string to start with `u`. |
 | `qr_text` | `zcash:<address>` plus an optional query. |
+| `payment_id` | 32 lowercase hex characters (128 random bits) identifying this session's [pay page](pay-page.md). |
+| `pay_url` | `<PUBLIC_BASE_URL>/pay/<payment_id>`, or `/pay/<payment_id>` when `PUBLIC_BASE_URL` is unset. |
 
 Query construction in `build_qr_text`, covered by tests in `src/service.rs`:
 
@@ -108,6 +115,10 @@ zcash:uaddr?amount=0.12345678&memo=Invoice%20INV-1001&message=Thanks%20for%20you
 Order is `amount`, then `memo`, then `message`. A missing or whitespace-only field is omitted. The value that is encoded is the original string, not a trimmed copy. Unreserved characters stay as themselves (`A-Z a-z 0-9 - _ . ~`). Every other byte becomes `%` plus two uppercase hex digits.
 
 The address is derived from the canonical UIVK with Orchard required, Sapling required, and the transparent receiver omitted. The app database also stores an Ironwood receiver whose bytes equal the Orchard receiver.
+
+### `GET /payments/{payment_id}` and `GET /pay/{payment_id}`
+
+`GET /payments/{payment_id}` returns `PaymentStatusResponse` as JSON. `GET /pay/{payment_id}` returns the hosted pay page as HTML. Both return `404` `NotFound` for an id that isn't 32 lowercase hex characters or isn't known. Fields, statuses, and how to expose them are in [Payment links and the pay page](pay-page.md).
 
 ## Webhook
 
@@ -166,6 +177,7 @@ Delivery outcomes are in the [integration guide](integration.md#retries). On sta
 | `SYNC_POLL_INTERVAL_SECONDS` | `5` | `u64`, must be greater than 0. Fallback delay when the mempool stream is unavailable. |
 | `ZCASH_WEBHOOK_URL` | unset | Absolute `http` or `https` URL with a host. |
 | `ZCASH_WEBHOOK_SECRET` | unset | HMAC key. Delivery runs only when this and the URL are both set. |
+| `PUBLIC_BASE_URL` | unset | Absolute `http(s)` URL, trailing `/` removed. Prefix for `pay_url`. See [Payment links](pay-page.md#exposing-the-page). |
 | `WEBHOOK_POLL_INTERVAL_SECONDS` | `2` | `u64`, greater than 0. |
 | `WEBHOOK_RETRY_DELAY_SECONDS` | `30` | `u64`, greater than 0. Base of the exponential backoff. |
 | `WEBHOOK_RETRY_MAX_DELAY_SECONDS` | `300` | `u64`, greater than 0. Cap on the backoff. |
@@ -189,6 +201,7 @@ A value that fails its parse or range check returns `InvalidConfig` and the proc
 - `ZCASH_WEBHOOK_URL must be an absolute http(s) URL; got ...`
 - `ZCASH_WEBHOOK_URL must use http or https; got ...`
 - `ZCASH_WEBHOOK_URL must include a host; got ...`
+- the same four messages for `PUBLIC_BASE_URL`
 
 Setting the URL without the secret, or the secret without the URL, is allowed. The webhook worker stays off.
 
@@ -278,6 +291,6 @@ pub fn init_logging(config: &Config) -> Result<WorkerGuard, AppError>;
 
 `run` is the path `main` uses. It calls `Config::from_env`, `init_logging`, `PaymentService::initialize`, the private webhook recovery, both `spawn_*` workers, `build_router`, and `axum::serve` with shutdown on Ctrl-C.
 
-`PaymentService`'s fields are private. `Config`'s fields are public and match the environment table: `listen_addr`, `network`, `startup_uivk`, `lightwalletd_url`, `birthday_height`, `wallet_db_path`, `app_db_path`, `log_dir`, `catch_up_threshold_blocks`, `catch_up_batch_size`, `sync_poll_interval_seconds`, `webhook_url`, `webhook_secret`, `webhook_poll_interval_seconds`, `webhook_retry_delay_seconds`, `webhook_retry_max_delay_seconds`, `webhook_max_attempts`, `webhook_report_confirmations`, `finality_confirmations`.
+`PaymentService`'s fields are private. `Config`'s fields are public and match the environment table: `listen_addr`, `network`, `startup_uivk`, `lightwalletd_url`, `birthday_height`, `wallet_db_path`, `app_db_path`, `log_dir`, `catch_up_threshold_blocks`, `catch_up_batch_size`, `sync_poll_interval_seconds`, `webhook_url`, `webhook_secret`, `webhook_poll_interval_seconds`, `webhook_retry_delay_seconds`, `webhook_retry_max_delay_seconds`, `webhook_max_attempts`, `webhook_report_confirmations`, `finality_confirmations`, `public_base_url`.
 
-`db`, `scanner`, `receipt_ingest`, `wallet_db`, and `zcash` are public as well. They are the storage and scan implementation behind the two HTTP routes. Their types and function signatures are the `pub` items in those files. This guide does not add behavior on top of them.
+`db`, `scanner`, `receipt_ingest`, `wallet_db`, and `zcash` are public as well. They are the storage and scan implementation behind the HTTP routes. Their types and function signatures are the `pub` items in those files. This guide does not add behavior on top of them.

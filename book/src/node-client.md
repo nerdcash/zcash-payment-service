@@ -29,7 +29,7 @@ const payments = createZcashPaymentClient({
 
 ## Create a payment session
 
-`createPaymentSession` calls [`POST /payment-session`](api.md#post-payment-session) and returns `{ address, qr_text }`.
+`createPaymentSession` calls [`POST /payment-session`](api.md#post-payment-session) and returns `{ address, qr_text, payment_id, pay_url }`. Pass `returnUrl` to have the [hosted pay page](pay-page.md) send the payer back to your store, then redirect the payer to `session.pay_url`. `getPayment(session.payment_id)` reads the same status the pay page shows. Use the webhook, not this status, to mark orders paid.
 
 ```ts
 const session = await payments.createPaymentSession({

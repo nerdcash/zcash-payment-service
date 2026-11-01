@@ -39,7 +39,7 @@ A successful call returns `200` with JSON:
 
 Every successful call mints a new unified address from the canonical UIVK. Calling twice returns two different addresses. The address string starts with `u`.
 
-Save `address` on your invoice. That string is what the webhook sends back, and it is the only handle you have. There is no payment-status route to poll.
+Save `address` on your invoice. That string is what the webhook sends back. The response also carries `payment_id` and `pay_url` for the [hosted pay page](pay-page.md), which you can use instead of rendering the QR code yourself.
 
 `payment_source` set to anything else returns `400` and this body:
 
