@@ -85,6 +85,12 @@ pub fn render_pay_page(status: &PaymentStatusResponse) -> Result<String, AppErro
         ),
         (None, _) => String::new(),
     };
+    // Polling removes this once the link settles, so a stale "remaining" amount never lingers.
+    let amount = if amount.is_empty() {
+        amount
+    } else {
+        format!(r#"<div class="due">{amount}</div>"#)
+    };
     let message = match status
         .message
         .as_deref()
@@ -154,7 +160,7 @@ h1 {{ font-size: 1.25rem; margin: 0 0 .5rem; }}
     statusEl.textContent = labels[s] || s;
     totalEl.textContent = total && Number(total) > 0 ? "Received so far: " + total + " ZEC" : "";
     if (s === "paid" || s === "received") {{
-      document.querySelectorAll(".qr, a.button").forEach((el) => el.remove());
+      document.querySelectorAll(".qr, a.button, .due").forEach((el) => el.remove());
       controlsRemoved = true;
     }}
   }};
@@ -307,6 +313,8 @@ mod tests {
         // gone, so a revoked receipt brings back a correct request.
         assert!(html.contains(r#"body.status === "awaiting_payment""#));
         assert!(html.contains("controlsRemoved"));
+        // Settling also removes the amount still due.
+        assert!(html.contains(r#".qr, a.button, .due"#));
     }
 
     #[test]
