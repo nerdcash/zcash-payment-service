@@ -96,8 +96,7 @@ impl Config {
             .map(|value| value.trim().trim_end_matches('/').to_string())
             .filter(|value| !value.is_empty());
         if let Some(public_base_url) = public_base_url.as_deref() {
-            validate_http_url("PUBLIC_BASE_URL", public_base_url)
-                .map_err(AppError::InvalidConfig)?;
+            validate_public_base_url(public_base_url).map_err(AppError::InvalidConfig)?;
         }
         let dev_simulated_payments = match env::var("ZCASH_DEV_SIMULATED_PAYMENTS")
             .ok()
@@ -330,6 +329,18 @@ fn validate_webhook_url(webhook_url: &str) -> Result<(), AppError> {
 
 /// Checks that `value` is an absolute `http` or `https` URL with a host.
 /// The error text names the setting or field so it can be reported as-is.
+/// `PUBLIC_BASE_URL` is a prefix that `/pay/<id>` is appended to, so it may hold an origin and a
+/// path but no query or fragment.
+pub fn validate_public_base_url(value: &str) -> Result<(), String> {
+    validate_http_url("PUBLIC_BASE_URL", value)?;
+    if value.contains('?') || value.contains('#') {
+        return Err(format!(
+            "PUBLIC_BASE_URL must not include a query or fragment; got {value}"
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_http_url(name: &str, value: &str) -> Result<(), String> {
     let uri = value.parse::<Uri>().map_err(|error| {
         format!("{name} must be a valid absolute http(s) URL; got {value}: {error}")
@@ -352,7 +363,15 @@ pub fn validate_http_url(name: &str, value: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_scan_parallelism, validate_webhook_url};
+    use super::{parse_scan_parallelism, validate_public_base_url, validate_webhook_url};
+
+    #[test]
+    fn public_base_url_rejects_query_and_fragment() {
+        assert!(validate_public_base_url("https://pay.example").is_ok());
+        assert!(validate_public_base_url("https://pay.example/zec").is_ok());
+        assert!(validate_public_base_url("https://pay.example/checkout?lang=en").is_err());
+        assert!(validate_public_base_url("https://pay.example/#x").is_err());
+    }
 
     #[test]
     fn scan_parallelism_defaults_when_unset() {

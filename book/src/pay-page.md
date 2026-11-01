@@ -10,7 +10,11 @@ service, on your own host. No other party sees the payment.
 3. The page shows the amount, a QR code of the ZIP-321 `zcash:` URI, an **Open in wallet**
    button, and the address. It polls `GET /payments/{payment_id}` every few seconds.
 4. When the received total covers the amount, the page says so and, if you gave a
-   `return_url`, sends the payer back there.
+   `return_url`, sends the payer back there. Without a `return_url` the page keeps polling, so it
+   also shows a receipt that is later dropped (for example an unconfirmed transaction that never
+   mines).
+5. If the URI is too long for a QR code (a very long `message`), the page shows a note in place of
+   the code; the wallet button and address still work.
 
 Your application still learns about the payment from the signed [webhook](integration.md#learning-that-a-payment-arrived).
 The redirect is only for the payer's convenience. Never mark an order paid because the payer
