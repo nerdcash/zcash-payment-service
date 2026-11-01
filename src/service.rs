@@ -25,6 +25,9 @@ pub struct PaymentService {
     dev_simulated_payments: bool,
     return_url_allowed_origins: Vec<String>,
     required_confirmations: Option<u32>,
+    /// The database's stored reporting threshold, applied to simulated receipts with an
+    /// explicit depth.
+    webhook_report_confirmations: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,6 +163,7 @@ impl PaymentService {
                 && wallet_identity.network == "testnet",
             return_url_allowed_origins: config.return_url_allowed_origins.clone(),
             required_confirmations: config.required_confirmations,
+            webhook_report_confirmations: service_metadata.webhook_report_confirmations,
         })
     }
 
@@ -266,18 +270,24 @@ impl PaymentService {
             }
             None => (ReceiptKind::Mined, 1, SIMULATED_TIP_HEIGHT),
         };
+        // Like a scanned receipt, an explicit depth below WEBHOOK_REPORT_CONFIRMATIONS isn't
+        // reported yet. Omitting `confirmations` keeps the fully confirmed behavior.
+        let eligible_for_webhook = confirmation_depth >= self.webhook_report_confirmations;
         let now = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)?;
         let affected = self.app_db.apply_attributed_receipts(
             &[AttributedScannedReceipt {
                 address_id: record.address_id,
-                receipt_uid: format!("{txid_hex}:simulated:0"),
+                // One receipt per (transaction, address), like separate outputs of a real
+                // transaction, so reusing a txid for another address never moves a receipt
+                // away from the first.
+                receipt_uid: format!("{txid_hex}:simulated:{}", record.address_id),
                 txid_hex: txid_hex.clone(),
                 pool: "orchard".into(),
                 value_zat,
                 mined_height,
                 confirmation_depth,
-                eligible_for_webhook: true,
+                eligible_for_webhook,
                 receipt_kind,
                 first_observed_at: now.clone(),
                 last_observed_at: now,
@@ -1103,6 +1113,73 @@ mod tests {
                 .total_received,
             "0.10000000"
         );
+    }
+
+    fn simulated_service(temp: &std::path::Path, report_confirmations: u32) -> PaymentService {
+        let mut config = config(temp);
+        config.network = "testnet".into();
+        config.startup_uivk = Some(TESTNET_UIVK.into());
+        config.dev_simulated_payments = true;
+        config.webhook_report_confirmations = report_confirmations;
+        PaymentService::initialize(config).unwrap()
+    }
+
+    fn simulate_at(
+        service: &PaymentService,
+        address: &str,
+        confirmations: u32,
+        txid: Option<String>,
+    ) -> super::SimulatePaymentResponse {
+        service
+            .simulate_payment(super::SimulatePaymentRequest {
+                address: address.into(),
+                amount: "0.1".into(),
+                confirmations: Some(confirmations),
+                txid,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn reusing_a_simulated_txid_at_another_address_keeps_both_receipts() {
+        let temp = tempdir().unwrap();
+        let service = simulated_service(temp.path(), 0);
+        let a = service
+            .issue_payment_session(session_request(Some("0.1"), None))
+            .unwrap();
+        let b = service
+            .issue_payment_session(session_request(Some("0.1"), None))
+            .unwrap();
+        let txid = simulate_at(&service, &a.address, 1, None).txid;
+        simulate_at(&service, &b.address, 1, Some(txid));
+        for session in [&a, &b] {
+            assert_eq!(
+                service
+                    .payment_status(&session.payment_id)
+                    .unwrap()
+                    .total_received,
+                "0.10000000"
+            );
+        }
+    }
+
+    #[test]
+    fn simulated_depths_below_the_reporting_threshold_are_not_counted() {
+        let temp = tempdir().unwrap();
+        let service = simulated_service(temp.path(), 3);
+        let session = service
+            .issue_payment_session(session_request(Some("0.1"), None))
+            .unwrap();
+        let total = |service: &PaymentService| {
+            service
+                .payment_status(&session.payment_id)
+                .unwrap()
+                .total_received
+        };
+        let txid = simulate_at(&service, &session.address, 1, None).txid;
+        assert_eq!(total(&service), "0.00000000");
+        simulate_at(&service, &session.address, 3, Some(txid));
+        assert_eq!(total(&service), "0.10000000");
     }
 
     #[test]

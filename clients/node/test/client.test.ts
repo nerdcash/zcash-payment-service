@@ -250,7 +250,10 @@ describe("receivedWithConfirmations", () => {
     const depths = { total_received: "0.3", received_by_confirmations: ["0.3", "0.2", "0.1"] };
     assert.equal(receivedWithConfirmations(depths, 0), "0.3");
     assert.equal(receivedWithConfirmations(depths, 2), "0.1");
-    assert.equal(receivedWithConfirmations(depths, 9), "0.1");
+    assert.throws(() => receivedWithConfirmations(depths, 9), RangeError);
+    assert.throws(() => receivedWithConfirmations(depths, 3), RangeError);
+    assert.throws(() => receivedWithConfirmations(depths, -1), RangeError);
+    assert.throws(() => receivedWithConfirmations(depths, 1.5), RangeError);
     assert.equal(receivedWithConfirmations({ total_received: "0.3" }, 2), "0.3");
   });
 });
