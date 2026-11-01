@@ -16,7 +16,9 @@ Edge cases the plugin handles:
 - **Funds drop after payment** (an unconfirmed transaction expires, or a reorg): the order goes **On hold** with a note.
 - **Payment for a cancelled, failed, or refunded order** is never completed automatically, since its stock may be gone. The plugin adds a note for you to review.
 - **An order keeps one Zcash address for life.** If you change an order's total after its address was issued, checkout stops and a payment arriving at the old address is noted for you to reconcile rather than completing the order. The same applies if the customer switches the order to another payment method. Once a payment is set aside for review, later payments to that order are also left for you until you delete the order's `_zcash_needs_review` meta.
-- **After a partial payment**, the pay page's QR code and wallet link ask only for the remaining balance.
+- **After a partial payment**, the pay page's QR code and wallet link ask only for the remaining balance. The remainder is based on receipts the service has reported (see `WEBHOOK_REPORT_CONFIRMATIONS`), so a just-mined payment can take a block or two to count.
+- **Holds you set yourself are kept.** The plugin only completes an on-hold order automatically if it put the order on hold itself (after funds dropped).
+- **Refunded or cancelled orders with Zcash funds are flagged for review**, and a closed order can't be paid again through checkout until you reconcile it.
 - **Overlapping webhook deliveries** for one order are serialized with a database lock, and the event version is recorded only after the order update succeeds, so a failed update is retried.
 
 If the service has no public pay page (no `PUBLIC_BASE_URL` and no *Pay page base URL* setting), the customer goes straight to the order-received page, which shows the address and a wallet link.
@@ -42,7 +44,7 @@ If the service has no public pay page (no `PUBLIC_BASE_URL` and no *Pay page bas
 
 ### Store currency
 
-The plugin adds ZEC to WooCommerce's currency list. If the store prices in ZEC, order totals are sent as-is. If it prices in another currency, you must enter a fixed rate (ZEC per one unit of store currency) and keep it current yourself; the gateway hides itself when no rate is set. The plugin does not fetch prices from any third party.
+The plugin adds ZEC to WooCommerce's currency list. If the store prices in ZEC, order totals are sent as-is. Before entering ZEC prices, set **WooCommerce → Settings → General → Number of decimals** to 8; with the default of 2, a price such as 0.001 ZEC rounds to 0. If it prices in another currency, you must enter a fixed rate (ZEC per one unit of store currency) and keep it current yourself; the gateway hides itself when no rate is set. The plugin does not fetch prices from any third party.
 
 ## Testing
 

@@ -10,6 +10,20 @@ final class Zcash_PG_Webhook {
 	const ROUTE           = '/webhook';
 
 	public static function register(): void {
+		// A refund or cancellation of an order that holds Zcash funds sets those funds aside, so
+		// reopening the order later can't reuse them automatically.
+		add_action(
+			'woocommerce_order_status_changed',
+			static function ( $order_id, $from, $to, $order ) {
+				if ( $order instanceof WC_Order && in_array( $to, array( 'refunded', 'cancelled', 'failed' ), true )
+					&& (int) $order->get_meta( Zcash_PG_Gateway::META_RECEIVED_ZAT ) > 0 ) {
+					$order->update_meta_data( Zcash_PG_Gateway::META_NEEDS_REVIEW, '1' );
+					$order->save();
+				}
+			},
+			10,
+			4
+		);
 		add_action(
 			'rest_api_init',
 			static function () {
@@ -82,7 +96,14 @@ final class Zcash_PG_Webhook {
 
 		$priced_now  = $order->get_total() . ' ' . $order->get_currency();
 		$review_note = null;
-		if ( $order->get_meta( Zcash_PG_Gateway::META_NEEDS_REVIEW ) ) {
+		if ( $order->has_status( 'on-hold' ) && ! $order->get_meta( Zcash_PG_Gateway::META_AUTO_HOLD ) ) {
+			// A hold the merchant set: leave it for them.
+			$review_note = sprintf(
+				/* translators: %s: received ZEC */
+				__( 'Zcash total for this order is now %s ZEC. The order is on hold, so it was not completed automatically.', 'zcash-payment-gateway' ),
+				$zec
+			);
+		} elseif ( $order->get_meta( Zcash_PG_Gateway::META_NEEDS_REVIEW ) ) {
 			// Once funds are set aside for review, keep later receipts there too until the
 			// merchant clears the flag, so reconciled or refunded funds never complete the order.
 			$review_note = sprintf(
@@ -119,6 +140,7 @@ final class Zcash_PG_Webhook {
 					Zcash_PG_Util::zat_to_zec( $due )
 				);
 				wc_get_logger()->warning( 'Order ' . $order->get_id() . ': ' . $message, array( 'source' => Zcash_PG_Gateway::ID ) );
+				$order->update_meta_data( Zcash_PG_Gateway::META_AUTO_HOLD, '1' );
 				$order->update_status( 'on-hold', $message );
 			} else {
 				/* translators: %s: ZEC total */
@@ -137,6 +159,26 @@ final class Zcash_PG_Webhook {
 			// Keep these funds in review even if the order is reopened later.
 			$order->update_meta_data( Zcash_PG_Gateway::META_NEEDS_REVIEW, '1' );
 		} elseif ( $due > 0 && $total >= $due ) {
+			// Deliveries can be retried after a newer state was skipped (for example a receipt
+			// that was later dropped). Confirm the service still sees the funds first.
+			$gateway = self::gateway();
+			$live    = $gateway ? $gateway->service_status( $order ) : null;
+			$live_zat = null === $live ? null : Zcash_PG_Util::zec_to_zat( (string) ( $live['total_received'] ?? '' ) );
+			if ( null === $live_zat ) {
+				return new WP_REST_Response( array( 'error' => 'cannot confirm with the service, retry' ), 503 );
+			}
+			if ( $live_zat < $due ) {
+				$order->add_order_note(
+					sprintf(
+						/* translators: 1: reported ZEC, 2: current ZEC */
+						__( 'A payment event reported %1$s ZEC, but the service now sees %2$s ZEC. Not completed.', 'zcash-payment-gateway' ),
+						$zec,
+						Zcash_PG_Util::zat_to_zec( $live_zat )
+					)
+				);
+				return new WP_REST_Response( array( 'ok' => true, 'ignored' => 'superseded' ), 200 );
+			}
+			$order->delete_meta_data( Zcash_PG_Gateway::META_AUTO_HOLD );
 			$order->update_meta_data( Zcash_PG_Gateway::META_RECEIVED_ZAT, (string) $total );
 			$order->save();
 			if ( ! $order->payment_complete( $observation['event_id'] ) ) {

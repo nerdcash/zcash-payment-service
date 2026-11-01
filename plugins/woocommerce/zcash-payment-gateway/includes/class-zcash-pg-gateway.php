@@ -18,6 +18,7 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 	const META_STATE_VERSION  = '_zcash_state_version';
 	const META_PRICED         = '_zcash_priced_total';
 	const META_NEEDS_REVIEW   = '_zcash_needs_review';
+	const META_AUTO_HOLD      = '_zcash_auto_hold';
 
 	public function __construct() {
 		$this->id                 = self::ID;
@@ -127,7 +128,7 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 		// order was repriced, stop and let the merchant reconcile instead of minting another.
 		$priced = $order->get_total() . ' ' . $order->get_currency();
 		if ( $order->get_meta( self::META_ADDRESS ) ) {
-			if ( $order->get_meta( self::META_NEEDS_REVIEW ) ) {
+			if ( $order->get_meta( self::META_NEEDS_REVIEW ) || $order->has_status( array( 'cancelled', 'failed', 'refunded' ) ) ) {
 				// Funds at this address were set aside for manual review. Reusing the session
 				// would wait forever for a balance change that already happened.
 				return $this->fail( __( 'A payment for this order is under review. Please contact the store.', 'zcash-payment-gateway' ) );
@@ -291,7 +292,7 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 	}
 
 	/** The service's current status for this order's payment link, or null if unavailable. */
-	private function service_status( WC_Order $order ): ?array {
+	public function service_status( WC_Order $order ): ?array {
 		$payment_id = (string) $order->get_meta( self::META_PAYMENT_ID );
 		if ( '' === $payment_id || ! ctype_xdigit( $payment_id ) ) {
 			return null;

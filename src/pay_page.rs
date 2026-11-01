@@ -57,12 +57,23 @@ pub fn render_pay_page(status: &PaymentStatusResponse) -> Result<String, AppErro
         r#"<p class="message">The payment request is too long for a QR code. Use the wallet link or copy the address below.</p>"#.to_string()
     });
     let title = status.label.as_deref().unwrap_or("Pay with Zcash");
-    let amount = match status.amount.as_deref() {
-        Some(amount) => format!(
+    let remaining = status.amount.as_deref().and_then(|amount| {
+        let received = crate::service::parse_zec_amount(&status.total_received).unwrap_or(0);
+        crate::service::remaining_amount(Some(amount), received).filter(|rest| rest != amount)
+    });
+    let amount = match (status.amount.as_deref(), remaining) {
+        // After a partial payment, lead with what is still owed so nobody resends the full sum.
+        (Some(amount), Some(rest)) => format!(
+            r#"<p class="amount"><span>{}</span> ZEC remaining</p><p class="message">of {} ZEC; {} ZEC received so far</p>"#,
+            escape_html(&rest),
+            escape_html(amount),
+            escape_html(&status.total_received)
+        ),
+        (Some(amount), None) => format!(
             r#"<p class="amount"><span>{}</span> ZEC</p>"#,
             escape_html(amount)
         ),
-        None => String::new(),
+        (None, _) => String::new(),
     };
     let message = match status
         .message
