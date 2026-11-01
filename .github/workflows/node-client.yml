@@ -1,17 +1,8 @@
 name: Node client
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "clients/node/**"
-      - ".github/workflows/node-client.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "clients/node/**"
-      - ".github/workflows/node-client.yml"
-  workflow_dispatch:
+  # Called from checks.yml, which owns the triggers and the required gate.
+  workflow_call:
 
 permissions:
   contents: read
