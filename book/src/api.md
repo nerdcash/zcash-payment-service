@@ -80,7 +80,7 @@ Body JSON, content type `application/json` (a subtype with a `+json` suffix is a
 | --- | --- | --- | --- |
 | `payment_source` | `String` | yes | Must equal `zcash`. |
 | `label` | `Option<String>` | no | Stored on the issued address. |
-| `memo` | `Option<String>` | no | Stored, and copied into `qr_text` when non-blank. |
+| `memo` | `Option<String>` | no | Stored, and copied into `qr_text` (base64url-encoded, as ZIP-321 requires) when non-blank. |
 | `message` | `Option<String>` | no | Stored, and copied into `qr_text` when non-blank. |
 | `amount` | `Option<String>` | no | Stored as text, and copied into `qr_text` when non-blank. Only the pay page status parses it (see [Payment links](pay-page.md#status)). |
 | `return_url` | `Option<String>` | no | Absolute `http(s)` URL the [pay page](pay-page.md) returns the payer to once paid. Blank is treated as unset. |
@@ -109,10 +109,10 @@ Query construction in `build_qr_text`, covered by tests in `src/service.rs`:
 
 ```text
 zcash:uaddr
-zcash:uaddr?amount=0.12345678&memo=Invoice%20INV-1001&message=Thanks%20for%20your%20purchase.
+zcash:uaddr?amount=0.12345678&memo=SW52b2ljZSBJTlYtMTAwMQ&message=Thanks%20for%20your%20purchase.
 ```
 
-Order is `amount`, then `memo`, then `message`. A missing or whitespace-only field is omitted. The value that is encoded is the original string, not a trimmed copy. Unreserved characters stay as themselves (`A-Z a-z 0-9 - _ . ~`). Every other byte becomes `%` plus two uppercase hex digits.
+Order is `amount`, then `memo`, then `message`. A missing or whitespace-only field is omitted. The value that is encoded is the original string, not a trimmed copy. As ZIP-321 requires, `memo` is the unpadded base64url encoding of its UTF-8 bytes. For `amount` and `message`, unreserved characters stay as themselves (`A-Z a-z 0-9 - _ . ~`). Every other byte becomes `%` plus two uppercase hex digits.
 
 The address is derived from the canonical UIVK with Orchard required, Sapling required, and the transparent receiver omitted. The app database also stores an Ironwood receiver whose bytes equal the Orchard receiver.
 

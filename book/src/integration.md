@@ -33,7 +33,7 @@ A successful call returns `200` with JSON:
 ```json
 {
   "address": "<unified address>",
-  "qr_text": "zcash:<unified address>?amount=0.12345678&memo=Invoice%20INV-1001&message=Thanks%20for%20your%20purchase."
+  "qr_text": "zcash:<unified address>?amount=0.12345678&memo=SW52b2ljZSBJTlYtMTAwMQ&message=Thanks%20for%20your%20purchase."
 }
 ```
 
@@ -56,7 +56,7 @@ Show `address` as the pay-to string. Render `qr_text` as a QR image in your appl
 `build_qr_text` builds that string:
 
 - The prefix is `zcash:` plus the address.
-- A non-blank `amount`, then `memo`, then `message`, are appended as a query string, in that order.
+- A non-blank `amount`, then `memo`, then `message`, are appended as a query string, in that order. `memo` is unpadded base64url of its UTF-8 bytes, as ZIP-321 requires; the others are percent-encoded.
 - A field that is missing or only whitespace is left out.
 - Bytes other than letters, digits, and `- _ . ~` are percent-encoded with uppercase hex. A space becomes `%20`.
 
@@ -64,7 +64,7 @@ The unit test in `src/service.rs` locks the encoding:
 
 ```text
 zcash:uaddr
-zcash:uaddr?amount=0.12345678&memo=Invoice%20INV-1001&message=Thanks%20for%20your%20purchase.
+zcash:uaddr?amount=0.12345678&memo=SW52b2ljZSBJTlYtMTAwMQ&message=Thanks%20for%20your%20purchase.
 ```
 
 The live `address` is the unified address from the response, in the same pattern. Wallets that understand a Zcash URI read the amount, memo, and message from those query parameters.
