@@ -15,7 +15,7 @@ linked in the table, as of October 2026. Check those sources for anything that m
 | Key required | Unified incoming viewing key (UIVK) | Unified full viewing key ([UFVK](https://github.com/atmospherelabs-dev/cipherpay-api#readme)), stored encrypted | Viewing key entered in the plugin settings, via [zcash-walletd](https://github.com/hhanh00/zcash-walletd) |
 | Chain access | lightwalletd | Not verified | lightwalletd, with an optional Zebra full node ([install guide](https://github.com/btcpay-zcash/btcpayserver-zcash-plugin/blob/master/docs/installation.md)) |
 | Zcash support status | Production | Production ([cipherpay.app](https://cipherpay.app)) | Plugin 1.0.2 published June 2025 ([forum](https://forum.zcashcommunity.com/t/upgrade-btcpayserver-zcash-plugin-for-2-1/50800)). The plugin shares one Zcash wallet across every store on the instance |
-| Store plugins | None. HTTP API, signed webhooks, and a [Node.js client](node-client.md) | Shopify app and WooCommerce plugin, plus payment links and a POS | BTCPay Server's own store integrations (not verified for Zcash specifically) |
+| Store plugins | [WooCommerce](woocommerce.md) and [Medusa](medusa.md) plugins, plus the HTTP API, signed webhooks, and a [Node.js client](node-client.md) | Shopify app and WooCommerce plugin, plus payment links and a POS | BTCPay Server's own store integrations (not verified for Zcash specifically) |
 | License | MIT | MIT ([cipherpay-api](https://github.com/atmospherelabs-dev/cipherpay-api)) | MIT ([BTCPay Server](https://github.com/btcpayserver/btcpayserver), [plugin](https://github.com/btcpay-zcash/btcpayserver-zcash-plugin)) |
 
 ## When to choose this service
@@ -30,7 +30,7 @@ linked in the table, as of October 2026. Check those sources for anything that m
 
 ## When another option may fit better
 
-- You sell on Shopify or WooCommerce and want a ready-made plugin: CipherPay offers both.
+- You sell on Shopify and want a ready-made app: CipherPay offers one.
 - You don't want to run any server process: CipherPay's hosted service handles that.
 - You already run BTCPay Server for other currencies and don't share the instance: the Zcash
   plugin adds ZEC there.
