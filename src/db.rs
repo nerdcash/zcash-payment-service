@@ -1220,7 +1220,33 @@ impl AppDb {
                     continue;
                 };
 
-            if dirty_state != "dirty" || current_total_zat == last_notified_total_zat {
+            if dirty_state != "dirty" {
+                continue;
+            }
+
+            // Compare with the newest total the receiver will see: an outstanding delivery's
+            // total if one is still pending, otherwise the last acknowledged total. Comparing only
+            // with the acknowledged total would drop a change back to it (for example a receipt
+            // dropped while its delivery is in flight), leaving the older event as the last word.
+            let outstanding_total_zat: Option<i64> = tx
+                .query_row(
+                    "SELECT total_received_zat FROM webhook_deliveries WHERE address_id = ?1 AND delivery_state IN ('queued', 'sending', 'retry_wait') ORDER BY delivery_id DESC LIMIT 1",
+                    params![address_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if current_total_zat == outstanding_total_zat.unwrap_or(last_notified_total_zat) {
+                if outstanding_total_zat.is_none() {
+                    tx.execute(
+                        "UPDATE address_totals SET dirty_state = 'clean', dirty_reason = NULL, dirty_since_height = NULL WHERE address_id = ?1",
+                        params![address_id],
+                    )?;
+                } else {
+                    tx.execute(
+                        "UPDATE address_totals SET dirty_state = 'queued_for_webhook', dirty_reason = 'webhook_queued' WHERE address_id = ?1",
+                        params![address_id],
+                    )?;
+                }
                 continue;
             }
 
@@ -1361,6 +1387,9 @@ impl AppDb {
         )?;
 
         tx.commit()?;
+        // If the total moved again while this event was in flight, send the newer state now
+        // rather than waiting for the next scan to notice.
+        self.queue_webhook_deliveries_for_dirty_addresses(&[address_id])?;
         Ok(())
     }
 
@@ -2397,6 +2426,139 @@ mod tests {
         assert_eq!(delivery.1, 100_000_000);
         assert_eq!(delivery.2, "queued");
         assert_eq!(dirty_state, "queued_for_webhook");
+    }
+
+    #[test]
+    fn a_change_back_to_the_acknowledged_total_is_still_delivered() {
+        let temp = tempdir().unwrap();
+        let db = AppDb::open(temp.path().join("app.db")).unwrap();
+        let record = db
+            .insert_issued_address(NewIssuedAddress {
+                unified_address: "uaddr1requeue",
+                address_source: "fresh",
+                diversifier_index_be: None,
+                diversifier_bytes: None,
+                request_label: None,
+                request_memo: None,
+                request_message: None,
+                requested_amount: None,
+            })
+            .unwrap();
+        db.insert_address_receivers(
+            record.address_id,
+            &[NewAddressReceiver {
+                pool: "sapling",
+                receiver_encoding: "sapling-s",
+                receiver_fingerprint: &[3, 3, 3, 3, 3, 3, 3, 3],
+            }],
+        )
+        .unwrap();
+        db.apply_attributed_receipts(
+            &[mined_receipt(
+                record.address_id,
+                "tx-success",
+                "sapling",
+                "tx-success:sapling:0",
+                25,
+                400,
+                10,
+                true,
+            )],
+            409,
+            100,
+        )
+        .unwrap();
+        db.queue_webhook_deliveries_for_dirty_addresses(&[record.address_id])
+            .unwrap();
+
+        // v1 (25 zat) is in flight when the receipt is dropped and the total returns to 0, the
+        // last acknowledged total. That newer state must still be delivered after v1.
+        let first = db
+            .claim_ready_webhook_delivery("2026-01-01T00:00:00Z")
+            .unwrap()
+            .unwrap();
+        let conn = rusqlite::Connection::open(temp.path().join("app.db")).unwrap();
+        conn.execute(
+            "UPDATE address_totals SET current_total_zat = 0, state_version = 2, dirty_state = 'dirty' WHERE address_id = ?1",
+            rusqlite::params![record.address_id],
+        )
+        .unwrap();
+        db.queue_webhook_deliveries_for_dirty_addresses(&[record.address_id])
+            .unwrap();
+        db.record_webhook_delivery_success(first.delivery_id, "2026-01-01T00:00:01Z", 200, "{}", 1)
+            .unwrap();
+
+        let second = db
+            .claim_ready_webhook_delivery("2026-01-01T00:00:02Z")
+            .unwrap()
+            .expect("the newer zero-total state is queued");
+        assert_eq!(second.event_id, format!("zcash:{}:v2", record.address_id));
+        assert_eq!(second.total_received_zat, 0);
+    }
+
+    #[test]
+    fn success_queues_a_change_made_while_the_delivery_was_in_flight() {
+        let temp = tempdir().unwrap();
+        let db = AppDb::open(temp.path().join("app.db")).unwrap();
+        let record = db
+            .insert_issued_address(NewIssuedAddress {
+                unified_address: "uaddr1requeue",
+                address_source: "fresh",
+                diversifier_index_be: None,
+                diversifier_bytes: None,
+                request_label: None,
+                request_memo: None,
+                request_message: None,
+                requested_amount: None,
+            })
+            .unwrap();
+        db.insert_address_receivers(
+            record.address_id,
+            &[NewAddressReceiver {
+                pool: "sapling",
+                receiver_encoding: "sapling-s",
+                receiver_fingerprint: &[3, 3, 3, 3, 3, 3, 3, 3],
+            }],
+        )
+        .unwrap();
+        db.apply_attributed_receipts(
+            &[mined_receipt(
+                record.address_id,
+                "tx-success",
+                "sapling",
+                "tx-success:sapling:0",
+                25,
+                400,
+                10,
+                true,
+            )],
+            409,
+            100,
+        )
+        .unwrap();
+        db.queue_webhook_deliveries_for_dirty_addresses(&[record.address_id])
+            .unwrap();
+
+        let first = db
+            .claim_ready_webhook_delivery("2026-01-01T00:00:00Z")
+            .unwrap()
+            .unwrap();
+        // The total moves while v1 is in flight, and nothing queues it yet.
+        let conn = rusqlite::Connection::open(temp.path().join("app.db")).unwrap();
+        conn.execute(
+            "UPDATE address_totals SET current_total_zat = 50, state_version = 2, dirty_state = 'dirty' WHERE address_id = ?1",
+            rusqlite::params![record.address_id],
+        )
+        .unwrap();
+        db.record_webhook_delivery_success(first.delivery_id, "2026-01-01T00:00:01Z", 200, "{}", 1)
+            .unwrap();
+
+        let second = db
+            .claim_ready_webhook_delivery("2026-01-01T00:00:02Z")
+            .unwrap()
+            .expect("success queues the newer state");
+        assert_eq!(second.event_id, format!("zcash:{}:v2", record.address_id));
+        assert_eq!(second.total_received_zat, 50);
     }
 
     #[test]
