@@ -26,11 +26,16 @@ These steps assume a fresh Ubuntu LTS server and that you log in as a user with 
    sudo apt install -y unattended-upgrades
    ```
 
-2. Install Docker Engine and the Compose plugin by following [Docker's instructions for Ubuntu](https://docs.docker.com/engine/install/ubuntu/), then check:
+2. Install Docker Engine and the Compose plugin by following [Docker's instructions for Ubuntu](https://docs.docker.com/engine/install/ubuntu/). To run `docker` without `sudo`, add your user to the `docker` group and log in again (membership in that group is equivalent to root on this server, so only add your own admin user), then check that you can reach the daemon:
 
    ```sh
+   sudo usermod -aG docker "$USER"
+   # log out and back in
    docker compose version
+   docker ps
    ```
+
+   Otherwise, put `sudo` in front of every `docker` command below.
 
 3. Use SSH keys and turn off password logins (`PasswordAuthentication no` in `/etc/ssh/sshd_config`), then `sudo systemctl reload ssh`.
 
@@ -109,31 +114,41 @@ Place a test order, open the pay page link, and confirm the order moves to paid 
 What to keep:
 
 - **The `.env` file.** It holds the viewing key, the birthday height, and the webhook secret. Store a copy somewhere safe and private, such as a password manager.
-- **The `service-data` volume.** It holds the app database (issued addresses, receipt totals, webhook state) and the wallet database. Without it, the service can rescan the chain from the birthday height to rebuild receipts, but the link between each order and its address is lost.
+- **The `service-data` volume.** It holds the app database (the viewing key, every issued address and payment session, receipt totals, and webhook state) and the wallet database. The service only credits payments to addresses recorded in the app database, so without a backup of it a rescan cannot rebuild payment sessions or their receipt totals. The funds themselves are safe in your wallet; you would match those payments to orders by hand.
 - **The wallet's seed phrase** lives in your wallet, not on this server. Back it up there; it is the only thing that can spend the funds.
 
 The Caddy volumes hold only certificates, which Caddy requests again if they are lost.
 
-To back up the data volume, stop the service for a moment so the databases are consistent, copy the volume to a tar file, and start it again:
+To back up the data volume, stop the service for a moment so the databases are consistent, stream the volume into a new archive that only you can read, and start it again:
 
 ```sh
 cd zcash-payment-service/deploy
+backup="$HOME/zcash-payment-data-$(date +%F-%H%M).tar.gz"
 docker compose stop zcash-payment-service
-docker run --rm -v zcash-payment_service-data:/data:ro -v "$PWD":/backup alpine \
-  tar czf /backup/zcash-payment-data-$(date +%F).tar.gz -C /data .
+(umask 077 && set -o noclobber &&
+  docker run --rm -v zcash-payment_service-data:/data:ro alpine tar czf - -C /data . > "$backup")
 docker compose start zcash-payment-service
 ```
 
-Copy the tar file off the server (for example with `scp`, or to object storage) and keep several. Payments made while the service is stopped are picked up when it starts again. You can run this nightly from `cron`. A provider's automatic server backups are a good extra layer but snapshot a running database, so keep your own copies too.
+The archive contains the viewing key and your payment records, so `umask 077` keeps it private, and `noclobber` refuses to overwrite an existing file. Copy it off the server (for example with `scp`, or to encrypted object storage) and keep several. Payments made while the service is stopped are picked up when it starts again. You can run this nightly from `cron`. A provider's automatic server backups are a good extra layer but snapshot a running database, so keep your own copies too.
 
-To restore on a new server, set up the server and `.env` as above, then load the backup before the first start:
+### Restoring
+
+Restore into a stopped service and an empty volume, never over a running one:
 
 ```sh
+cd zcash-payment-service/deploy
+docker compose down                                   # stops everything; volumes are kept
+docker volume rm zcash-payment_service-data           # only if it exists and you are replacing it
 docker compose create
-docker run --rm -v zcash-payment_service-data:/data -v "$PWD":/backup alpine \
-  tar xzf /backup/zcash-payment-data-YYYY-MM-DD.tar.gz -C /data
+docker run --rm -i -v zcash-payment_service-data:/data alpine tar xzf - -C /data \
+  < ~/zcash-payment-data-YYYY-MM-DD-HHMM.tar.gz
 docker compose up -d --wait
 ```
+
+On a new server, set up the server and `.env` as above first.
+
+**Restoring a backup older than your last checkout reuses addresses.** The service hands out addresses in sequence and records the position in the app database, so a restored older copy issues again the addresses it handed out after the backup, and a late payment to one of those could be credited to a new, unrelated order. If orders were placed after the backup was taken, do not take new orders with the restored copy: keep the payment method turned off in your store, settle the orders placed after the backup by checking your wallet, and for new orders start a separate deployment with a fresh volume and the viewing key of a new wallet account. Frequent backups, such as nightly or after each order, keep that gap small.
 
 ## Upgrades
 
@@ -141,7 +156,7 @@ Pin `IMAGE_TAG` in `.env` to a release, such as `0.2.0` (a release tag `v0.2.0` 
 
 1. Read the release notes for the new version.
 2. Take a backup (above).
-3. Update the deployment files and the image:
+3. Update the deployment files and the image. `--force-recreate` makes Caddy load a changed `Caddyfile`, which it does not do on its own:
 
    ```sh
    cd zcash-payment-service
@@ -149,10 +164,10 @@ Pin `IMAGE_TAG` in `.env` to a release, such as `0.2.0` (a release tag `v0.2.0` 
    cd deploy
    # set IMAGE_TAG in .env to the new version, and compare .env with .env.example for new settings
    docker compose pull
-   docker compose up -d --wait
+   docker compose up -d --wait --force-recreate
    docker compose logs --tail 50 zcash-payment-service
    ```
 
-To roll back, set `IMAGE_TAG` back and run `docker compose up -d --wait`. If the new version changed the database, restore the backup you took before upgrading.
+To roll back when the release notes say the new version did not change the database, set `IMAGE_TAG` back and run `docker compose up -d --wait`. If it did change the database, stop the service first (`docker compose down`) so the old image never opens the upgraded database, set `IMAGE_TAG` back, and follow [Restoring](#restoring) with the backup you took before upgrading. The warning there applies: if orders were placed on the new version, those addresses will be issued again by the restored copy.
 
 Keep the server itself updated too: unattended-upgrades handles security updates, and `docker compose pull` for the `caddy` image picks up Caddy fixes.
