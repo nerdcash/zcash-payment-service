@@ -192,6 +192,7 @@ mod tests {
             webhook_report_confirmations: 1,
             finality_confirmations: 100,
             public_base_url: None,
+            dev_simulated_payments: false,
         }
     }
 

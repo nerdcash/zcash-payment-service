@@ -5,6 +5,7 @@ use axum::{
 use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use serde::{Deserialize, Serialize};
 
+use crate::db::{AttributedScannedReceipt, ReceiptKind};
 use crate::{
     config::{validate_http_url, Config},
     db::{
@@ -21,6 +22,7 @@ pub struct PaymentService {
     app_db: AppDb,
     wallet_view: WalletView,
     public_base_url: Option<String>,
+    dev_simulated_payments: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +76,19 @@ pub struct PaymentStatusResponse {
     pub created_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SimulatePaymentRequest {
+    pub address: String,
+    pub amount: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SimulatePaymentResponse {
+    /// Made-up transaction id. It does not exist on any chain.
+    pub txid: String,
+    pub total_received: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub ok: bool,
@@ -114,6 +129,8 @@ impl PaymentService {
             app_db,
             wallet_view,
             public_base_url: config.public_base_url.clone(),
+            dev_simulated_payments: config.dev_simulated_payments
+                && wallet_identity.network == "testnet",
         })
     }
 
@@ -168,6 +185,66 @@ impl PaymentService {
             qr_text,
             payment_id,
             pay_url,
+        })
+    }
+
+    /// Records a made-up receipt for an issued address and queues its webhook, as if a
+    /// payment had been mined. Only available when `ZCASH_DEV_SIMULATED_PAYMENTS` is on,
+    /// which the configuration allows on testnet only. Returns the address's new total.
+    pub fn simulate_payment(
+        &self,
+        request: SimulatePaymentRequest,
+    ) -> Result<SimulatePaymentResponse, AppError> {
+        if !self.dev_simulated_payments {
+            return Err(AppError::NotFound("simulated payments are disabled".into()));
+        }
+        let value_zat = parse_zec_amount(&request.amount)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                AppError::InvalidRequest("amount must be a positive ZEC decimal".into())
+            })?;
+        let record = self
+            .app_db
+            .find_issued_address(&request.address)?
+            .ok_or_else(|| AppError::NotFound("unknown address".into()))?;
+        let txid_hex = hex_string(&{
+            let mut bytes = [0u8; 32];
+            UnwrapErr(SysRng).fill_bytes(&mut bytes);
+            bytes
+        });
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)?;
+        let affected = self.app_db.apply_attributed_receipts(
+            &[AttributedScannedReceipt {
+                address_id: record.address_id,
+                receipt_uid: format!("{txid_hex}:simulated:0"),
+                txid_hex: txid_hex.clone(),
+                pool: "orchard".into(),
+                value_zat,
+                mined_height: 1,
+                confirmation_depth: 1_000,
+                eligible_for_webhook: true,
+                receipt_kind: ReceiptKind::Mined,
+                first_observed_at: now.clone(),
+                last_observed_at: now,
+            }],
+            1_000,
+            u32::MAX,
+        )?;
+        self.app_db
+            .queue_webhook_deliveries_for_dirty_addresses(&affected)?;
+        let total_zat = self
+            .app_db
+            .address_total_zat(record.address_id)?
+            .unwrap_or_default();
+        tracing::warn!(
+            address = %request.address,
+            value_zat,
+            "recorded a SIMULATED payment (ZCASH_DEV_SIMULATED_PAYMENTS is on)"
+        );
+        Ok(SimulatePaymentResponse {
+            txid: txid_hex,
+            total_received: format_zat_as_zec(total_zat),
         })
     }
 
@@ -280,6 +357,13 @@ pub async fn payment_session(
     Json(request): Json<PaymentSessionRequest>,
 ) -> Result<Json<PaymentSessionResponse>, AppError> {
     Ok(Json(state.service.issue_payment_session(request)?))
+}
+
+pub async fn simulate_payment(
+    State(state): State<AppState>,
+    Json(request): Json<SimulatePaymentRequest>,
+) -> Result<Json<SimulatePaymentResponse>, AppError> {
+    Ok(Json(state.service.simulate_payment(request)?))
 }
 
 pub async fn payment_status(
@@ -441,6 +525,7 @@ mod tests {
             webhook_report_confirmations: 1,
             finality_confirmations: 100,
             public_base_url: None,
+            dev_simulated_payments: false,
         }
     }
 
@@ -824,5 +909,91 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing.status(), 404);
+    }
+
+    const TESTNET_UIVK: &str = "uivktest1ayc2s599yatrj5kgp2fr4sn0xa2enkykd858d5p7rfwq8u3u65zf3dgzdar2jqzm6nzck5laqdhhfuj849hv8t3gzkgqmecvq49420024aucsy73rxsa9222n8uczqmgus06nx80mjf5kl3tq4qnc3tjj3muhdxhmnavdfqaa8vjk7aqq03ll5sfntag00f4av72q89xwfkw3g26ez3mge8k0xt3kzs5hgzj5sz9fkqdgu4mphd";
+
+    fn simulate(service: &PaymentService, address: &str, amount: &str) -> Result<String, AppError> {
+        service
+            .simulate_payment(super::SimulatePaymentRequest {
+                address: address.into(),
+                amount: amount.into(),
+            })
+            .map(|response| response.total_received)
+    }
+
+    #[test]
+    fn simulated_payments_are_off_by_default() {
+        let temp = tempdir().unwrap();
+        let service = PaymentService::initialize(config(temp.path())).unwrap();
+        let session = service
+            .issue_payment_session(session_request(Some("1"), None))
+            .unwrap();
+        assert!(matches!(
+            simulate(&service, &session.address, "1").unwrap_err(),
+            AppError::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn simulated_payments_are_ignored_on_mainnet_even_if_enabled() {
+        let temp = tempdir().unwrap();
+        let mut config = config(temp.path());
+        config.dev_simulated_payments = true;
+        let service = PaymentService::initialize(config).unwrap();
+        let session = service
+            .issue_payment_session(session_request(Some("1"), None))
+            .unwrap();
+        assert!(matches!(
+            simulate(&service, &session.address, "1").unwrap_err(),
+            AppError::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn simulated_payments_update_totals_and_queue_webhooks_on_testnet() {
+        let temp = tempdir().unwrap();
+        let mut config = config(temp.path());
+        config.network = "testnet".into();
+        config.startup_uivk = Some(TESTNET_UIVK.into());
+        config.dev_simulated_payments = true;
+        let service = PaymentService::initialize(config).unwrap();
+        let session = service
+            .issue_payment_session(session_request(Some("0.5"), None))
+            .unwrap();
+
+        assert_eq!(
+            simulate(&service, &session.address, "0.2").unwrap(),
+            "0.20000000"
+        );
+        assert_eq!(
+            service.payment_status(&session.payment_id).unwrap().status,
+            PaymentStatus::PartiallyPaid
+        );
+        assert_eq!(
+            simulate(&service, &session.address, "0.3").unwrap(),
+            "0.50000000"
+        );
+        assert_eq!(
+            service.payment_status(&session.payment_id).unwrap().status,
+            PaymentStatus::Paid
+        );
+
+        let conn = rusqlite::Connection::open(temp.path().join("app.db")).unwrap();
+        let queued: i64 = conn
+            .query_row("SELECT COUNT(*) FROM webhook_deliveries", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(queued >= 1);
+
+        assert!(matches!(
+            simulate(&service, &session.address, "0").unwrap_err(),
+            AppError::InvalidRequest(_)
+        ));
+        assert!(matches!(
+            simulate(&service, "u1unknown", "1").unwrap_err(),
+            AppError::NotFound(_)
+        ));
     }
 }

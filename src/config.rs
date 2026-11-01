@@ -38,6 +38,8 @@ pub struct Config {
     pub finality_confirmations: u32,
     /// Public origin (and optional path prefix) where payers reach the pay page.
     pub public_base_url: Option<String>,
+    /// Enables `POST /dev/simulate-payment`. Testnet only; for automated tests.
+    pub dev_simulated_payments: bool,
 }
 
 impl Config {
@@ -97,6 +99,19 @@ impl Config {
             validate_http_url("PUBLIC_BASE_URL", public_base_url)
                 .map_err(AppError::InvalidConfig)?;
         }
+        let dev_simulated_payments = match env::var("ZCASH_DEV_SIMULATED_PAYMENTS")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            None | Some("") | Some("false") | Some("0") => false,
+            Some("true") | Some("1") => true,
+            Some(_) => {
+                return Err(AppError::InvalidConfig(
+                    "ZCASH_DEV_SIMULATED_PAYMENTS must be 'true' or 'false'".into(),
+                ))
+            }
+        };
         let webhook_secret = env::var("ZCASH_WEBHOOK_SECRET")
             .ok()
             .map(|value| value.trim().to_string())
@@ -254,6 +269,12 @@ impl Config {
             .transpose()?
             .unwrap_or(FINALITY_CONFIRMATIONS);
 
+        if dev_simulated_payments && network != "testnet" {
+            return Err(AppError::InvalidConfig(
+                "ZCASH_DEV_SIMULATED_PAYMENTS is only allowed with ZCASH_NETWORK=testnet".into(),
+            ));
+        }
+
         Ok(Self {
             listen_addr,
             network,
@@ -276,6 +297,7 @@ impl Config {
             webhook_report_confirmations,
             finality_confirmations,
             public_base_url,
+            dev_simulated_payments,
         })
     }
 }

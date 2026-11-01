@@ -602,6 +602,17 @@ impl AppDb {
         Ok(record)
     }
 
+    pub fn address_total_zat(&self, address_id: i64) -> Result<Option<i64>, AppError> {
+        let conn = self.connect()?;
+        conn.query_row(
+            "SELECT current_total_zat FROM address_totals WHERE address_id = ?1",
+            params![address_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(AppError::from)
+    }
+
     /// Records the public payment id that the pay page and status route use for an issued address.
     pub fn insert_payment_link(
         &self,
@@ -2195,6 +2206,7 @@ mod tests {
             webhook_report_confirmations: 1,
             finality_confirmations: 100,
             public_base_url: None,
+            dev_simulated_payments: false,
         }
     }
 
