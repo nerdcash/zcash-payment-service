@@ -71,7 +71,7 @@ The service runs on testnet with `ZCASH_DEV_SIMULATED_PAYMENTS=true`, which turn
 - pays a revoked order and checks that the payment is held for review and the order stays revoked;
 - checks that the webhook route rejects a bad signature with `401` and acknowledges a signed event for an unknown address.
 
-CI runs both on every pull request (`.github/workflows/edd-plugin.yml`) and keeps screenshots of each step as a build artifact.
+CI runs both on every pull request through `.github/workflows/checks.yml`, which calls `.github/workflows/edd-plugin.yml`, and keeps screenshots of each step as a build artifact.
 
 ### What the tests do not cover
 
