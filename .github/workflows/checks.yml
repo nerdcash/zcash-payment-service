@@ -1,0 +1,101 @@
+name: Checks
+
+# Single entry point for every check that gates a merge. Each area lives in its own
+# reusable workflow; the `required` job at the bottom depends on all of them, so the
+# ruleset only needs to require "All required checks".
+
+on:
+  push:
+    branches: [main]
+  # Every base branch, so stacked and Renovate PRs get the gate too.
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      service: ${{ steps.filter.outputs.service }}
+      node-client: ${{ steps.filter.outputs.node-client }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          predicate-quantifier: every
+          filters: |
+            # Anything but docs or the npm client (the old ci.yml push paths-ignore).
+            service:
+              - "**"
+              - "!**/*.md"
+              - "!book/**"
+              - "!docs/**"
+              - "!clients/**"
+            node-client:
+              - "clients/node/**"
+              - ".github/workflows/node-client.yml"
+
+  ci:
+    name: CI
+    needs: changes
+    # Pull requests and manual runs always build; pushes to main skip docs-only merges.
+    if: github.event_name != 'push' || needs.changes.outputs.service == 'true'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      packages: write
+
+  node-client:
+    name: Node client
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.node-client == 'true'
+    uses: ./.github/workflows/node-client.yml
+
+  medusa:
+    name: Medusa plugin
+    uses: ./.github/workflows/medusa-plugin.yml
+
+  vendure:
+    name: Vendure plugin
+    uses: ./.github/workflows/vendure-plugin.yml
+
+  woocommerce:
+    name: WooCommerce plugin
+    uses: ./.github/workflows/woocommerce-plugin.yml
+
+  pages:
+    name: Pages
+    uses: ./.github/workflows/pages.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: write
+
+  required:
+    name: All required checks
+    if: always()
+    needs: [changes, ci, node-client, medusa, vendure, woocommerce, pages]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail unless every needed job succeeded or was skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          bad="$(echo "$RESULTS" | jq -r '[to_entries[] | select(.value.result != "success" and .value.result != "skipped") | .key] | join(", ")')"
+          if [ -n "$bad" ]; then
+            echo "::error::Required jobs did not succeed: $bad"
+            exit 1
+          fi
