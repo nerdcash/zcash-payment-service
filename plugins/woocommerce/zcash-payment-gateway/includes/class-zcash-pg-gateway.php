@@ -128,6 +128,9 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 		// shown must always reach this order. Reuse it when the price is unchanged; if the
 		// order was repriced, stop and let the merchant reconcile instead of minting another.
 		$priced = $order->get_total() . ' ' . $order->get_currency();
+		// A failed order without a Zcash session (for example a declined card) may retry with
+		// Zcash; only a failure that happens during the service request below stops checkout.
+		$was_failed = $order->has_status( 'failed' );
 		if ( $order->get_meta( self::META_ADDRESS ) ) {
 			if ( $order->get_meta( self::META_NEEDS_REVIEW ) || $order->has_status( array( 'cancelled', 'failed', 'refunded' ) ) ) {
 				// Funds at this address were set aside for manual review. Reusing the session
@@ -191,7 +194,11 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 		$order = wc_get_order( $order->get_id() );
 		// A hold placed meanwhile is the merchant's, and a switch to another gateway abandons
 		// this session; neither may be overwritten by the pending transition below.
-		if ( ! $order || $order->is_paid() || $order->has_status( array( 'cancelled', 'failed', 'refunded', 'on-hold' ) )
+		$closed = array( 'cancelled', 'refunded', 'on-hold' );
+		if ( ! $was_failed ) {
+			$closed[] = 'failed';
+		}
+		if ( ! $order || $order->is_paid() || $order->has_status( $closed )
 			|| self::ID !== $order->get_payment_method()
 			|| $order->get_total() . ' ' . $order->get_currency() !== $priced ) {
 			return $this->fail( __( 'This order changed while payment was starting. Please try again or contact the store.', 'zcash-payment-gateway' ) );

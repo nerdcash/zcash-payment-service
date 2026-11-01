@@ -107,6 +107,11 @@ impl PaymentService {
         let wallet_view =
             WalletView::decode(&wallet_identity.network, &wallet_identity.canonical_uivk)?;
 
+        if config.dev_simulated_payments && config.lightwalletd_url.is_some() {
+            return Err(AppError::StartupIntegrity(
+                "ZCASH_DEV_SIMULATED_PAYMENTS cannot be combined with LIGHTWALLETD_URL".into(),
+            ));
+        }
         if config.lightwalletd_url.is_some() && app_db.has_simulated_data()? {
             return Err(AppError::StartupIntegrity(
                 "this database holds simulated payments (ZCASH_DEV_SIMULATED_PAYMENTS); use a fresh database for real scanning".into(),
@@ -1059,6 +1064,14 @@ mod tests {
             service.payment_status(&session.payment_id).unwrap().status,
             PaymentStatus::Paid
         );
+
+        // Simulation and real scanning can't be combined, even when Config is built directly.
+        let mut both = config.clone();
+        both.lightwalletd_url = Some("https://lwd.example:443".into());
+        assert!(matches!(
+            PaymentService::initialize(both),
+            Err(AppError::StartupIntegrity(_))
+        ));
 
         let conn = rusqlite::Connection::open(temp.path().join("app.db")).unwrap();
         let queued: i64 = conn
