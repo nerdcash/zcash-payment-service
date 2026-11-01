@@ -5,6 +5,8 @@ const store = process.env.STORE_URL ?? "http://localhost:9000"
 module.exports = defineConfig({
   projectConfig: {
     databaseUrl: process.env.DATABASE_URL,
+    // In production mode Medusa asks for TLS unless the database is on localhost; the e2e Postgres has none.
+    databaseDriverOptions: { connection: { ssl: false } },
     // The e2e store is served over plain http on localhost, so session cookies can't be Secure.
     cookieOptions: { secure: false, sameSite: "lax" },
     http: {
