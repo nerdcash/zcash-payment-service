@@ -479,7 +479,6 @@ mod tests {
         assert!(parse_allowed_origins(" , ").unwrap().is_empty());
     }
 
-
     #[test]
     fn public_base_url_rejects_query_and_fragment() {
         assert!(validate_public_base_url("https://pay.example").is_ok());
