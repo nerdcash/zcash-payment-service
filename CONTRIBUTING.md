@@ -8,7 +8,7 @@ its clients, and the docs stay in sync.
 
 | Component | Location | Ships as | Released by |
 | --- | --- | --- | --- |
-| Payment service (Rust crate + binary) | `Cargo.toml`, `src/` | Rust crate, and the Docker image `ghcr.io/nerdcash/zcash-payment-service` | `.github/workflows/ci.yml`: every push to `main` that touches service code pushes `:main` and `:<commit sha>` tags |
+| Payment service (Rust crate + binary) | `Cargo.toml`, `src/` | Rust crate, and the Docker image `ghcr.io/nerdcash/zcash-payment-service` | `.github/workflows/ci.yml`: every push to `main` that touches service code pushes `:main` and `:<commit sha>` tags. `.github/workflows/release.yml`: pushing a `v<version>` tag that matches `Cargo.toml` pushes `:v<version>` and `:<version>`, and for a stable version also `:<major>.<minor>` (if it is the newest patch in that series) and `:latest` (if it is the newest stable release) |
 | Node client | `clients/node/` | npm package `@nerdcash/zcash-payment-client` | `.github/workflows/publish-node-client.yml`: pushing a `client-node-v<version>` tag publishes to npm with trusted publishing and provenance |
 | Guide (mdBook) | `book/` | GitHub Pages site | `.github/workflows/pages.yml`: every push to `main` |
 | Reference docs | `README.md`, `docs/`, `design.md`, `src/spec.md`, `specs/` | Read in the repo | n/a |
@@ -69,6 +69,14 @@ ZCASH_TESTNET_LIGHTWALLETD_URL=https://testnet.lightwalletd.com:9067 \
 In PowerShell, set `$env:ZCASH_TESTNET_LIGHTWALLETD_URL` first, then run the same `cargo test` command.
 
 If the change touches the HTTP or webhook contract, follow the table above in the same PR.
+
+
+### Releasing the service
+
+1. Bump `version` in `Cargo.toml` (and `Cargo.lock` with `cargo update -p zcash-payment-service`) in a PR, and merge it.
+2. Tag the merge commit: `git tag v<version> && git push origin v<version>`.
+3. `release.yml` checks the tag against `Cargo.toml`, runs the tests, and pushes the versioned images.
+   A pre-release tag such as `v0.2.0-rc.1` publishes only its own tags and never moves `:latest`.
 
 ## Changing the docs
 
