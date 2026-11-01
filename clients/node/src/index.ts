@@ -80,17 +80,25 @@ function optionalAmounts(value: unknown): string[] | undefined | null {
 
 /**
  * The amount received with at least `confirmations` confirmations, or `total_received` when the
- * service does not report `received_by_confirmations`. Depths past the end of the array use its
- * last element, the deepest the service tracks.
+ * service does not report `received_by_confirmations`. Throws a `RangeError` for a depth that
+ * isn't a non-negative integer or that the service doesn't track (past the end of the array),
+ * rather than substituting a shallower total.
  */
 export function receivedWithConfirmations(
   payment: { total_received: string; received_by_confirmations?: string[] },
   confirmations: number,
 ): string {
+  if (!Number.isSafeInteger(confirmations) || confirmations < 0) {
+    throw new RangeError(`confirmations must be a non-negative integer, got ${confirmations}`);
+  }
   const depths = payment.received_by_confirmations;
-  if (!depths || depths.length === 0) return payment.total_received;
-  const index = Math.max(0, Math.min(Math.floor(confirmations), depths.length - 1));
-  return depths[index];
+  if (depths === undefined) return payment.total_received;
+  if (confirmations >= depths.length) {
+    throw new RangeError(
+      `the service tracks up to ${depths.length - 1} confirmations (REQUIRED_CONFIRMATIONS), not ${confirmations}`,
+    );
+  }
+  return depths[confirmations];
 }
 
 export class PaymentServiceError extends Error {

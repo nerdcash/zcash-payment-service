@@ -56,7 +56,7 @@ const svg = await QRCode.toString(session.qr_text, { type: "svg" });
 
 ## Verify a webhook
 
-When the service sets `REQUIRED_CONFIRMATIONS`, both the observation and `getPayment` carry `received_by_confirmations` (see [Waiting for confirmations](integration.md#waiting-for-confirmations)). `receivedWithConfirmations(observation, n)` returns the amount with at least `n` confirmations, or `total_received` when the field is absent.
+When the service sets `REQUIRED_CONFIRMATIONS`, both the observation and `getPayment` carry `received_by_confirmations` (see [Waiting for confirmations](integration.md#waiting-for-confirmations)). `receivedWithConfirmations(observation, n)` returns the amount with at least `n` confirmations, or `total_received` when the field is absent. It throws a `RangeError` for a depth the service doesn't track, so asking for 6 confirmations from a service set to 1 fails instead of returning a shallower amount.
 
 `verifyWebhook(rawBody, signature)` does three things:
 
