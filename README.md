@@ -26,6 +26,7 @@ The guide at **[nerdcash.github.io/zcash-payment-service](https://nerdcash.githu
 - [Node.js client](https://nerdcash.github.io/zcash-payment-service/node-client.html): using the npm package
 - [API reference](https://nerdcash.github.io/zcash-payment-service/api.html): HTTP routes, the webhook contract, configuration, crate entry points
 - [Deployment](https://nerdcash.github.io/zcash-payment-service/deployment.html): the Docker image, Compose, and embedding the crate
+- [Running on a small VPS](https://nerdcash.github.io/zcash-payment-service/vps.html): a step-by-step guide to the HTTPS compose deployment on a ~$5–6/month server, with backups and upgrades
 
 ## Node.js client
 

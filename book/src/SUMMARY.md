@@ -13,4 +13,5 @@
   - [Vendure plugin](vendure.md)
 - [API reference](api.md)
 - [Deployment](deployment.md)
+  - [Running on a small VPS](vps.md)
 - [Comparison with other processors](comparison.md)

@@ -1,0 +1,70 @@
+# Production deployment: the service behind Caddy, which gets and renews HTTPS certificates on its
+# own. Only the pay page and its status route are public; the rest of the API is not.
+# Copy .env.example to .env, fill it in, then `docker compose up -d`. See https://nerdcash.github.io/zcash-payment-service/vps.html.
+name: zcash-payment
+
+services:
+  zcash-payment-service:
+    image: ghcr.io/nerdcash/zcash-payment-service:${IMAGE_TAG:-main}
+    restart: unless-stopped
+    environment:
+      PORT: 8787
+      APP_DATA_DIR: /data/zcash-payment
+      ZCASH_NETWORK: ${ZCASH_NETWORK:-mainnet}
+      ZCASH_UIVK: ${ZCASH_UIVK:?set ZCASH_UIVK in .env}
+      ZCASH_BIRTHDAY_HEIGHT: ${ZCASH_BIRTHDAY_HEIGHT:?set ZCASH_BIRTHDAY_HEIGHT in .env}
+      LIGHTWALLETD_URL: ${LIGHTWALLETD_URL:-}
+      ZCASH_WEBHOOK_URL: ${ZCASH_WEBHOOK_URL:-}
+      ZCASH_WEBHOOK_SECRET: ${ZCASH_WEBHOOK_SECRET:-}
+      WEBHOOK_REPORT_CONFIRMATIONS: ${WEBHOOK_REPORT_CONFIRMATIONS:-0}
+      PUBLIC_BASE_URL: https://${PAY_DOMAIN:?set PAY_DOMAIN in .env}${PUBLIC_HTTPS_PORT_SUFFIX:-}
+      RETURN_URL_ALLOWED_ORIGINS: ${RETURN_URL_ALLOWED_ORIGINS:-}
+      # Testnet-only test hook. Never set it in production.
+      ZCASH_DEV_SIMULATED_PAYMENTS: ${ZCASH_DEV_SIMULATED_PAYMENTS:-false}
+    # The private API (creating payment sessions) has no authentication. It is published only on
+    # PRIVATE_API_BIND, which defaults to this machine's loopback address, never on the public
+    # interface. Caddy reaches the service over the compose network.
+    ports:
+      - "${PRIVATE_API_BIND:-127.0.0.1}:${PRIVATE_API_PORT:-8787}:8787"
+    volumes:
+      - service-data:/data/zcash-payment
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8787/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  caddy:
+    image: caddy:2@sha256:36c24ad91a7ff7bc4c87fe22bfa8df3c4b18da0773d73fc12ee2c52b98c0bb7e
+    restart: unless-stopped
+    depends_on:
+      zcash-payment-service:
+        condition: service_healthy
+    environment:
+      PAY_DOMAIN: ${PAY_DOMAIN}
+      TLS_MODE: ${TLS_MODE:-acme}
+      CADDY_HTTP_PORT: ${CADDY_HTTP_PORT:-80}
+      CADDY_HTTPS_PORT: ${CADDY_HTTPS_PORT:-443}
+    ports:
+      - "${CADDY_HTTP_PORT:-80}:${CADDY_HTTP_PORT:-80}"
+      - "${CADDY_HTTPS_PORT:-443}:${CADDY_HTTPS_PORT:-443}"
+      - "${CADDY_HTTPS_PORT:-443}:${CADDY_HTTPS_PORT:-443}/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      # Caddy's admin endpoint, which listens only inside the container.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  # The wallet database: back it up (see https://nerdcash.github.io/zcash-payment-service/vps.html).
+  service-data:
+  # Caddy's certificates and ACME account.
+  caddy-data:
+  caddy-config:
