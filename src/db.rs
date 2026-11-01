@@ -1230,7 +1230,9 @@ impl AppDb {
             // dropped while its delivery is in flight), leaving the older event as the last word.
             let outstanding_total_zat: Option<i64> = tx
                 .query_row(
-                    "SELECT total_received_zat FROM webhook_deliveries WHERE address_id = ?1 AND delivery_state IN ('queued', 'sending', 'retry_wait') ORDER BY delivery_id DESC LIMIT 1",
+                    // Only deliveries newer than the acknowledged one count: an older retry is
+                    // already superseded and the receiver will ignore it.
+                    "SELECT total_received_zat FROM webhook_deliveries WHERE address_id = ?1 AND delivery_state IN ('queued', 'sending', 'retry_wait') AND delivery_id > COALESCE((SELECT acked.delivery_id FROM webhook_deliveries AS acked INNER JOIN address_totals ON address_totals.address_id = acked.address_id AND address_totals.last_notified_event_id = acked.event_id WHERE acked.address_id = ?1), 0) ORDER BY delivery_id DESC LIMIT 1",
                     params![address_id],
                     |row| row.get(0),
                 )
@@ -1381,6 +1383,19 @@ impl AppDb {
             "INSERT INTO webhook_delivery_attempts (delivery_id, attempted_at, http_status, response_body, transport_error, duration_ms) VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
             params![delivery_id, attempted_at, http_status, response_body, duration_ms],
         )?;
+        // A late success for an event older than the acknowledged one must not move the
+        // acknowledgment backwards.
+        let acked_delivery_id: Option<i64> = tx
+            .query_row(
+                "SELECT acked.delivery_id FROM webhook_deliveries AS acked INNER JOIN address_totals ON address_totals.address_id = acked.address_id AND address_totals.last_notified_event_id = acked.event_id WHERE acked.address_id = ?1",
+                params![address_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if acked_delivery_id.is_some_and(|acked| acked > delivery_id) {
+            tx.commit()?;
+            return Ok(());
+        }
         tx.execute(
             "UPDATE address_totals SET last_notified_total_zat = ?2, last_notified_event_id = ?3, last_notified_at = ?4, dirty_state = CASE WHEN current_total_zat = ?2 THEN 'clean' ELSE 'dirty' END, dirty_reason = CASE WHEN current_total_zat = ?2 THEN NULL ELSE dirty_reason END, dirty_since_height = CASE WHEN current_total_zat = ?2 THEN NULL ELSE dirty_since_height END WHERE address_id = ?1",
             params![address_id, total_received_zat, event_id, attempted_at],
@@ -2559,6 +2574,112 @@ mod tests {
             .expect("success queues the newer state");
         assert_eq!(second.event_id, format!("zcash:{}:v2", record.address_id));
         assert_eq!(second.total_received_zat, 50);
+    }
+
+    #[test]
+    fn a_stale_retry_neither_suppresses_nor_overrides_newer_states() {
+        let temp = tempdir().unwrap();
+        let db = AppDb::open(temp.path().join("app.db")).unwrap();
+        let record = db
+            .insert_issued_address(NewIssuedAddress {
+                unified_address: "uaddr1stale",
+                address_source: "fresh",
+                diversifier_index_be: None,
+                diversifier_bytes: None,
+                request_label: None,
+                request_memo: None,
+                request_message: None,
+                requested_amount: None,
+            })
+            .unwrap();
+        db.insert_address_receivers(
+            record.address_id,
+            &[NewAddressReceiver {
+                pool: "sapling",
+                receiver_encoding: "sapling-s",
+                receiver_fingerprint: &[3, 3, 3, 3, 3, 3, 3, 3],
+            }],
+        )
+        .unwrap();
+        db.apply_attributed_receipts(
+            &[mined_receipt(
+                record.address_id,
+                "tx-success",
+                "sapling",
+                "tx-success:sapling:0",
+                25,
+                400,
+                10,
+                true,
+            )],
+            409,
+            100,
+        )
+        .unwrap();
+        db.queue_webhook_deliveries_for_dirty_addresses(&[record.address_id])
+            .unwrap();
+
+        let set_total = |total: i64, version: i64| {
+            let conn = rusqlite::Connection::open(temp.path().join("app.db")).unwrap();
+            conn.execute(
+                "UPDATE address_totals SET current_total_zat = ?2, state_version = ?3, dirty_state = 'dirty' WHERE address_id = ?1",
+                rusqlite::params![record.address_id, total, version],
+            )
+            .unwrap();
+        };
+        // v1 (25) fails and waits to retry far in the future.
+        let v1 = db
+            .claim_ready_webhook_delivery("2026-01-01T00:00:00Z")
+            .unwrap()
+            .unwrap();
+        db.record_webhook_delivery_retry(
+            v1.delivery_id,
+            "2026-01-01T00:00:01Z",
+            "2026-01-02T00:00:00Z",
+            Some(500),
+            Some("no"),
+            None,
+            1,
+        )
+        .unwrap();
+        // v2 (0) is queued and acknowledged first.
+        set_total(0, 2);
+        db.queue_webhook_deliveries_for_dirty_addresses(&[record.address_id])
+            .unwrap();
+        let v2 = db
+            .claim_ready_webhook_delivery("2026-01-01T00:00:02Z")
+            .unwrap()
+            .unwrap();
+        assert_eq!(v2.total_received_zat, 0);
+        db.record_webhook_delivery_success(v2.delivery_id, "2026-01-01T00:00:03Z", 200, "{}", 1)
+            .unwrap();
+        // v3 (25) matches the stale v1, but must still be queued.
+        set_total(25, 3);
+        db.queue_webhook_deliveries_for_dirty_addresses(&[record.address_id])
+            .unwrap();
+        let v3 = db
+            .claim_ready_webhook_delivery("2026-01-01T00:00:04Z")
+            .unwrap()
+            .expect("v3 is queued");
+        assert_eq!(v3.event_id, format!("zcash:{}:v3", record.address_id));
+        db.record_webhook_delivery_success(v3.delivery_id, "2026-01-01T00:00:05Z", 200, "{}", 1)
+            .unwrap();
+        // The late v1 success doesn't move the acknowledgment back.
+        let v1 = db
+            .claim_ready_webhook_delivery("2026-01-03T00:00:00Z")
+            .unwrap()
+            .unwrap();
+        db.record_webhook_delivery_success(v1.delivery_id, "2026-01-03T00:00:01Z", 200, "{}", 1)
+            .unwrap();
+        let conn = rusqlite::Connection::open(temp.path().join("app.db")).unwrap();
+        let acked: Option<String> = conn
+            .query_row(
+                "SELECT last_notified_event_id FROM address_totals WHERE address_id = ?1",
+                rusqlite::params![record.address_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(acked, Some(format!("zcash:{}:v3", record.address_id)));
     }
 
     #[test]
