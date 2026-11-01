@@ -22,6 +22,7 @@ final class ZcashPaymentOrder {
 		'pay_url'        => '',
 		'amount_zat'     => 0,
 		'received_zat'   => 0,
+		'seen_zat'       => 0,
 		'state_version'  => 0,
 		'priced'         => '',
 		'needs_review'   => 0,
@@ -30,6 +31,8 @@ final class ZcashPaymentOrder {
 	);
 
 	public static function install(): bool {
+		// uninstall() keeps the table, so a reinstall may find one from an earlier version:
+		// migrate it as well.
 		return Db::getInstance()->execute(
 			'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . self::TABLE . '` (
 				`id_order` INT UNSIGNED NOT NULL PRIMARY KEY,
@@ -39,6 +42,7 @@ final class ZcashPaymentOrder {
 				`pay_url` TEXT NULL,
 				`amount_zat` BIGINT NOT NULL DEFAULT 0,
 				`received_zat` BIGINT NOT NULL DEFAULT 0,
+				`seen_zat` BIGINT NOT NULL DEFAULT 0,
 				`state_version` BIGINT NOT NULL DEFAULT 0,
 				`priced` VARCHAR(64) NOT NULL DEFAULT \'\',
 				`needs_review` TINYINT(1) NOT NULL DEFAULT 0,
@@ -46,7 +50,18 @@ final class ZcashPaymentOrder {
 				`pre_hold_state` INT UNSIGNED NOT NULL DEFAULT 0,
 				KEY `address` (`address`(191))
 			) ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8mb4'
-		);
+		) && self::upgrade();
+	}
+
+	/** Adds the columns later versions introduced to a table created by an earlier one. */
+	public static function upgrade(): bool {
+		$db     = Db::getInstance();
+		$table  = _DB_PREFIX_ . self::TABLE;
+		$exists = $db->executeS( 'SHOW COLUMNS FROM `' . $table . "` LIKE 'seen_zat'" );
+		if ( ! is_array( $exists ) ) {
+			return false;
+		}
+		return array() !== $exists || $db->execute( 'ALTER TABLE `' . $table . '` ADD `seen_zat` BIGINT NOT NULL DEFAULT 0 AFTER `received_zat`' );
 	}
 
 	/**

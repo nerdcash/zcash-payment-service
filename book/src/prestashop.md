@@ -13,6 +13,7 @@
 Edge cases the module handles:
 
 - **An order keeps one Zcash address for life.** If the order's total changes after its address was issued, a payment to the old address is noted for you to reconcile rather than completing the order.
+- **Waiting for confirmations.** When the service sets [`REQUIRED_CONFIRMATIONS`](integration.md#waiting-for-confirmations), the module marks the order **Payment accepted** only once the last `received_by_confirmations` element covers it. A payment seen in the mempool, or with fewer confirmations, adds a *pending confirmation* message and leaves the order **Awaiting Zcash payment**; a reorg that undoes those confirmations on a paid order puts it in **Zcash funds on hold**. When the service doesn't set `REQUIRED_CONFIRMATIONS`, the array is absent and the module uses `total_received` as before.
 - **Funds drop after payment** (an unconfirmed transaction expires, or a reorg): the order goes to **Zcash funds on hold** with a message. The module restores the earlier state only if it put the order on hold itself.
 - **Payment for a cancelled, refunded, or failed order** is never applied automatically. Moving an order with a Zcash address to one of those states, or issuing a credit slip for it, flags it for review. Later payments to it are left for you until you clear `needs_review` for the order in `zcash_payment_order`.
 - **After a partial payment**, the pay page asks only for the remaining balance. The remainder is based on receipts the service has reported (see `WEBHOOK_REPORT_CONFIRMATIONS`).
@@ -72,13 +73,14 @@ The service runs on testnet with `ZCASH_DEV_SIMULATED_PAYMENTS=true`, which turn
 - simulates a partial payment and checks the pay page shows it, then simulates the rest;
 - checks that the browser returns to the confirmation page and that the order is **Payment accepted** with the full amount recorded;
 - pays a cancelled order and checks that the payment is held for review and the order stays cancelled;
+- simulates one payment at 0, 1, and 2 confirmations (the stack sets `REQUIRED_CONFIRMATIONS=2`) and checks the order stays **Awaiting Zcash payment** with a single *pending confirmation* message until the last;
 - checks that the webhook rejects a bad signature with `401` and acknowledges a signed event for an unknown address.
 
 CI runs both on every pull request through `.github/workflows/checks.yml`, which calls `.github/workflows/prestashop-plugin.yml`, and keeps screenshots of each step as a build artifact.
 
 ### What the tests do not cover
 
-- **The chain.** Simulated payments skip lightwalletd, trial decryption, and confirmations.
+- **The chain.** Simulated payments skip lightwalletd and trial decryption, and their confirmations are simulated rather than mined.
 - **Wallet apps.** Nobody scans the QR code or opens the `zcash:` link in a real wallet.
 - **Other setups.** Only one PrestaShop version, the default theme, and guest checkout are exercised.
 - **Non-ZEC pricing.** The manual exchange rate path has unit tests but no end-to-end run.

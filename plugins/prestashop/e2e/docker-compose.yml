@@ -69,6 +69,8 @@ services:
       # Incoming viewing key derived from the repository's public test key. It holds no funds.
       ZCASH_UIVK: uivktest1ayc2s599yatrj5kgp2fr4sn0xa2enkykd858d5p7rfwq8u3u65zf3dgzdar2jqzm6nzck5laqdhhfuj849hv8t3gzkgqmecvq49420024aucsy73rxsa9222n8uczqmgus06nx80mjf5kl3tq4qnc3tjj3muhdxhmnavdfqaa8vjk7aqq03ll5sfntag00f4av72q89xwfkw3g26ez3mge8k0xt3kzs5hgzj5sz9fkqdgu4mphd
       ZCASH_BIRTHDAY_HEIGHT: 3000000
+      # Exercise received_by_confirmations: orders are paid only at depth 2.
+      REQUIRED_CONFIRMATIONS: 2
       ZCASH_WEBHOOK_URL: http://localhost:${E2E_PS_PORT:-8080}/index.php?fc=module&module=zcashpayment&controller=webhook
       ZCASH_WEBHOOK_SECRET: e2e-webhook-secret
       WEBHOOK_POLL_INTERVAL_SECONDS: 1

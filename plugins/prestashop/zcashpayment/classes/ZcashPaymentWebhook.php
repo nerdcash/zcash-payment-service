@@ -64,7 +64,9 @@ final class ZcashPaymentWebhook {
 		}
 
 		$state   = (int) $order->current_state;
+		// Settle on the confirmed amount; the seen amount (mempool included) only drives notes.
 		$total   = $observation['total_zat'];
+		$seen    = $observation['seen_zat'];
 		$due     = (int) $row['amount_zat'];
 		$zec     = ZcashPaymentUtil::zat_to_zec( $total );
 		$due_zec = ZcashPaymentUtil::zat_to_zec( $due );
@@ -142,8 +144,13 @@ final class ZcashPaymentWebhook {
 			} else {
 				$g::note( $id_order, sprintf( 'Zcash funds recovered to %s ZEC. Hold released.', $zec ) );
 			}
-		} else {
-			$g::note( $id_order, sprintf( 'Received %s of %s ZEC so far.', $zec, $due_zec ) );
+		} elseif ( $seen !== $row['seen_zat'] ) {
+			// Each new block deepening a payment sends an event; note only a change in the amount.
+			if ( $due > 0 && $seen >= $due ) {
+				$g::note( $id_order, sprintf( 'Payment of %s ZEC received, pending confirmation. The order is marked paid once it is confirmed.', ZcashPaymentUtil::zat_to_zec( $seen ) ) );
+			} else {
+				$g::note( $id_order, sprintf( 'Received %s of %s ZEC so far.', ZcashPaymentUtil::zat_to_zec( $seen ), $due_zec ) );
+			}
 		}
 
 		// Record the version last, after the transition above succeeded.
@@ -151,6 +158,7 @@ final class ZcashPaymentWebhook {
 			$id_order,
 			array(
 				'received_zat'  => $total,
+				'seen_zat'      => $seen,
 				'state_version' => $observation['state_version'],
 			)
 		);

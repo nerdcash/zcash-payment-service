@@ -60,9 +60,16 @@ check(
 		'address'        => 'utest1abc',
 		'total_received' => '0.50000000',
 		'total_zat'      => 50000000,
+		'seen_zat'       => 50000000,
 		'state_version'  => 3,
 	)
 );
+$deep = str_replace( '"observed_at"', '"received_by_confirmations":["0.50000000","0.50000000","0.20000000"],"observed_at"', $body );
+check( 'parse settled from depths', ZcashPaymentUtil::parse_observation( $deep )['total_zat'] ?? null, 20000000 );
+check( 'parse seen from depths', ZcashPaymentUtil::parse_observation( $deep )['seen_zat'] ?? null, 50000000 );
+check( 'parse object depths', ZcashPaymentUtil::parse_observation( str_replace( '"observed_at"', '"received_by_confirmations":{"0":"0.5","1":"0","2":"0"},"observed_at"', $body ) ), null );
+check( 'parse empty depths', ZcashPaymentUtil::parse_observation( str_replace( '"observed_at"', '"received_by_confirmations":[],"observed_at"', $body ) ), null );
+check( 'parse bad depth', ZcashPaymentUtil::parse_observation( str_replace( '"observed_at"', '"received_by_confirmations":["0.5",1],"observed_at"', $body ) ), null );
 check( 'parse wrong source', ZcashPaymentUtil::parse_observation( str_replace( '"zcash"', '"btc"', $body ) ), null );
 check( 'parse no version', ZcashPaymentUtil::parse_observation( str_replace( ':v3', '', $body ) ), null );
 check( 'parse not json', ZcashPaymentUtil::parse_observation( 'nope' ), null );
@@ -77,6 +84,18 @@ check( 'balance webhook', ZcashPaymentBalance::from_webhook( array( 'total_recei
 check( 'balance webhook missing', ZcashPaymentBalance::from_webhook( array() ), null );
 check( 'balance webhook not string', ZcashPaymentBalance::from_webhook( array( 'total_received' => 1 ) ), null );
 check( 'balance status', ZcashPaymentBalance::from_status( array( 'total_received' => '0.00000001' ) ), 1 );
+check( 'decode object depths', ZcashPaymentBalance::decode( '{"received_by_confirmations":{"0":"0.5"}}' ), null );
+check( 'decode list depths', ZcashPaymentBalance::decode( '{"received_by_confirmations":["0.5"]}' ), array( 'received_by_confirmations' => array( '0.5' ) ) );
+check( 'decode top-level list', ZcashPaymentBalance::decode( '["0.5"]' ), null );
+// One payment of 0.5 ZEC stepping through 0, 1 and 2 of 2 required confirmations.
+foreach ( array( array( '0.5', '0', '0' ), array( '0.5', '0.5', '0' ), array( '0.5', '0.5', '0.5' ) ) as $i => $depths ) {
+	$status = array( 'total_received' => '0.5', 'received_by_confirmations' => $depths );
+	check( "depth $i seen", ZcashPaymentBalance::seen( $status ), 50000000 );
+	check( "depth $i settled", ZcashPaymentBalance::from_status( $status ), 2 === $i ? 50000000 : 0 );
+}
+check( 'settled fallback without depths', ZcashPaymentBalance::settled( array( 'total_received' => '0.5' ) ), 50000000 );
+check( 'settled too many depths', ZcashPaymentBalance::settled( array( 'total_received' => '0', 'received_by_confirmations' => array_fill( 0, 102, '0' ) ) ), null );
+check( 'settled keyed depths', ZcashPaymentBalance::settled( array( 'total_received' => '0', 'received_by_confirmations' => array( 1 => '0' ) ) ), null );
 check( 'total PrestaShop 6 decimals', ZcashPaymentUtil::order_total_to_zat( '0.500000', 'ZEC', '' ), 50000000 );
 
 if ( $failures > 0 ) {
