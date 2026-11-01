@@ -125,8 +125,32 @@ services:
 
 `src/spec.md` describes the calling application as the owner of `ZCASH_PAYMENT_SERVICE_BASE_URL`. This binary does not read that variable. From another container on the same Compose network the base URL is `http://zcash-payment-service:8787`.
 
-Give the container the UIVK, the birthday height, and a lightwalletd URL, and keep the volume. The process has no request authentication, so publish the port on an address your application can reach and the public internet cannot. If you use the [pay page](pay-page.md), forward only `/pay/*` and `/payments/*` to the public through a reverse proxy, and set `PUBLIC_BASE_URL`. Leave `ZCASH_DEV_SIMULATED_PAYMENTS` unset; it is a testnet-only test hook.
-Give the container the UIVK, the birthday height, and a lightwalletd URL, and keep the volume. The process has no request authentication, so publish the port on an address your application can reach and the public internet cannot. If you use the [pay page](pay-page.md), forward only `/pay/*` and `/payments/*` to the public through a reverse proxy, set `PUBLIC_BASE_URL`, and set `RETURN_URL_ALLOWED_ORIGINS` to your store's origin.
+Give the container the UIVK, the birthday height, and a lightwalletd URL, and keep the volume. The process has no request authentication, so publish the port on an address your application can reach and the public internet cannot. If you use the [pay page](pay-page.md), forward only `/pay/*` and `/payments/*` to the public through a reverse proxy, set `PUBLIC_BASE_URL`, and set `RETURN_URL_ALLOWED_ORIGINS` to your store's origin. Leave `ZCASH_DEV_SIMULATED_PAYMENTS` unset; it is a testnet-only test hook.
+
+### Production compose file with HTTPS
+
+`deploy/` has a ready-made setup that does the above: the service plus [Caddy](https://caddyserver.com), which gets and renews HTTPS certificates by itself.
+
+- Only `/pay/*` and `/payments/*` are served publicly on `PAY_DOMAIN`. Everything else, including `/payment-session` and `/health`, answers `404`, and HTTP redirects to HTTPS.
+- The private API is published on `PRIVATE_API_BIND` (default `127.0.0.1`) for a store on the same server. For a store elsewhere, set it to a private-network or VPN address, never a public one.
+- The wallet database lives in the `service-data` volume, and Caddy's certificates live in `caddy-data`. Both have healthchecks and restart automatically.
+
+```sh
+cd deploy
+cp .env.example .env    # set PAY_DOMAIN, ZCASH_UIVK, ZCASH_BIRTHDAY_HEIGHT, LIGHTWALLETD_URL, webhook settings
+docker compose up -d
+```
+
+Point `PAY_DOMAIN`'s DNS at the server and open ports 80 and 443 first, so the certificate can be issued. To try it without a domain, set `PAY_DOMAIN=localhost` and `TLS_MODE=internal`, which uses Caddy's own local certificate authority.
+
+`deploy/test/test.sh` brings the stack up on `localhost` with the internal CA, on testnet with simulated payments. It checks that:
+
+- the pay page and status route work over HTTPS;
+- the private routes are not public;
+- a payment shows publicly;
+- data and certificates survive a restart.
+
+CI runs it on every pull request (`.github/workflows/deploy.yml`).
 
 ## Scan parallelism
 
