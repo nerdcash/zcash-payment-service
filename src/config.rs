@@ -38,6 +38,8 @@ pub struct Config {
     pub finality_confirmations: u32,
     /// Public origin (and optional path prefix) where payers reach the pay page.
     pub public_base_url: Option<String>,
+    /// Enables `POST /dev/simulate-payment`. Testnet only; for automated tests.
+    pub dev_simulated_payments: bool,
     /// Origins (`scheme://host[:port]`) a session's `return_url` may point to. Empty allows any
     /// `http(s)` URL.
     pub return_url_allowed_origins: Vec<String>,
@@ -99,6 +101,19 @@ impl Config {
         if let Some(public_base_url) = public_base_url.as_deref() {
             validate_public_base_url(public_base_url).map_err(AppError::InvalidConfig)?;
         }
+        let dev_simulated_payments = match env::var("ZCASH_DEV_SIMULATED_PAYMENTS")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            None | Some("") | Some("false") | Some("0") => false,
+            Some("true") | Some("1") => true,
+            Some(_) => {
+                return Err(AppError::InvalidConfig(
+                    "ZCASH_DEV_SIMULATED_PAYMENTS must be 'true' or 'false'".into(),
+                ))
+            }
+        };
         let return_url_allowed_origins = env::var("RETURN_URL_ALLOWED_ORIGINS")
             .map(|value| parse_allowed_origins(&value))
             .unwrap_or_else(|_| Ok(Vec::new()))
@@ -260,6 +275,11 @@ impl Config {
             .transpose()?
             .unwrap_or(FINALITY_CONFIRMATIONS);
 
+        if dev_simulated_payments {
+            validate_dev_simulated_payments(&network, lightwalletd_url.as_deref())
+                .map_err(AppError::InvalidConfig)?;
+        }
+
         Ok(Self {
             listen_addr,
             network,
@@ -282,6 +302,7 @@ impl Config {
             webhook_report_confirmations,
             finality_confirmations,
             public_base_url,
+            dev_simulated_payments,
             return_url_allowed_origins,
         })
     }
@@ -315,6 +336,23 @@ fn validate_webhook_url(webhook_url: &str) -> Result<(), AppError> {
 
 /// Checks that `value` is an absolute `http` or `https` URL with a host.
 /// The error text names the setting or field so it can be reported as-is.
+/// Simulated payments are a test hook. They are refused on mainnet, and alongside a real chain
+/// scanner, which would race with them and could later reconcile the fake receipts away.
+pub fn validate_dev_simulated_payments(
+    network: &str,
+    lightwalletd_url: Option<&str>,
+) -> Result<(), String> {
+    if network != "testnet" {
+        return Err(
+            "ZCASH_DEV_SIMULATED_PAYMENTS is only allowed with ZCASH_NETWORK=testnet".into(),
+        );
+    }
+    if lightwalletd_url.is_some() {
+        return Err("ZCASH_DEV_SIMULATED_PAYMENTS cannot be combined with LIGHTWALLETD_URL".into());
+    }
+    Ok(())
+}
+
 /// `PUBLIC_BASE_URL` is a prefix that `/pay/<id>` is appended to, so it may hold an origin and a
 /// path but no query or fragment.
 pub fn validate_public_base_url(value: &str) -> Result<(), String> {
@@ -403,6 +441,19 @@ pub fn validate_return_url(value: &str, allowed: &[String]) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        parse_scan_parallelism, validate_dev_simulated_payments, validate_public_base_url,
+        validate_webhook_url,
+    };
+
+    #[test]
+    fn dev_simulated_payments_needs_testnet_without_scanner() {
+        assert!(validate_dev_simulated_payments("testnet", None).is_ok());
+        assert!(validate_dev_simulated_payments("mainnet", None).is_err());
+        assert!(
+            validate_dev_simulated_payments("testnet", Some("https://lwd.example:443")).is_err()
+        );
+    }
     #[test]
     fn return_url_allow_list() {
         use super::{parse_allowed_origins, validate_return_url};
@@ -427,8 +478,6 @@ mod tests {
         assert!(parse_allowed_origins("ftp://shop.example").is_err());
         assert!(parse_allowed_origins(" , ").unwrap().is_empty());
     }
-
-    use super::{parse_scan_parallelism, validate_public_base_url, validate_webhook_url};
 
     #[test]
     fn public_base_url_rejects_query_and_fragment() {

@@ -1,0 +1,79 @@
+# End-to-end test stack: WordPress + WooCommerce + MySQL + this service on testnet with simulated
+# payments. Needs no store, wallet, or chain accounts. See run.sh and book/src/woocommerce.md.
+name: zcash-woocommerce-e2e
+
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wordpress
+      MYSQL_PASSWORD: wordpress
+      MYSQL_RANDOM_ROOT_PASSWORD: "1"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uwordpress", "-pwordpress"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  wordpress:
+    image: wordpress:php8.3-apache
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${E2E_WP_PORT:-8080}:80"
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+      WORDPRESS_DB_NAME: wordpress
+    volumes:
+      - wp:/var/www/html
+      - ../zcash-payment-gateway:/var/www/html/wp-content/plugins/zcash-payment-gateway:ro
+    healthcheck:
+      test: ["CMD", "curl", "-s", "-o", "/dev/null", "http://localhost/wp-includes/version.php"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  wpcli:
+    image: wordpress:cli-php8.3
+    profiles: ["tools"]
+    user: "33:33"
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+      WORDPRESS_DB_NAME: wordpress
+    volumes:
+      - wp:/var/www/html
+      - ../zcash-payment-gateway:/var/www/html/wp-content/plugins/zcash-payment-gateway:ro
+
+  zcash-payment-service:
+    build: ../../..
+    ports:
+      - "127.0.0.1:${E2E_SERVICE_PORT:-8787}:8787"
+    environment:
+      PORT: 8787
+      APP_DATA_DIR: /data
+      ZCASH_NETWORK: testnet
+      # Incoming viewing key derived from the repository's public test key. It holds no funds.
+      ZCASH_UIVK: uivktest1ayc2s599yatrj5kgp2fr4sn0xa2enkykd858d5p7rfwq8u3u65zf3dgzdar2jqzm6nzck5laqdhhfuj849hv8t3gzkgqmecvq49420024aucsy73rxsa9222n8uczqmgus06nx80mjf5kl3tq4qnc3tjj3muhdxhmnavdfqaa8vjk7aqq03ll5sfntag00f4av72q89xwfkw3g26ez3mge8k0xt3kzs5hgzj5sz9fkqdgu4mphd
+      ZCASH_BIRTHDAY_HEIGHT: 3000000
+      ZCASH_WEBHOOK_URL: http://wordpress/?rest_route=/zcash-payment/v1/webhook
+      ZCASH_WEBHOOK_SECRET: e2e-webhook-secret
+      WEBHOOK_POLL_INTERVAL_SECONDS: 1
+      PUBLIC_BASE_URL: http://localhost:${E2E_SERVICE_PORT:-8787}
+      RETURN_URL_ALLOWED_ORIGINS: ${E2E_WP_URL:-http://localhost:8080}
+      ZCASH_DEV_SIMULATED_PAYMENTS: "true"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8787/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+volumes:
+  wp:

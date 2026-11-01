@@ -13,8 +13,8 @@ on:
       - ".github/workflows/node-client.yml"
       - ".github/workflows/publish-node-client.yml"
       - ".github/workflows/pages.yml"
+  # Every base branch, so stacked PRs get the required check too.
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:

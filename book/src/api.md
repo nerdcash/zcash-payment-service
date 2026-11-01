@@ -120,6 +120,10 @@ The address is derived from the canonical UIVK with Orchard required, Sapling re
 
 `GET /payments/{payment_id}` returns `PaymentStatusResponse` as JSON. `GET /pay/{payment_id}` returns the hosted pay page as HTML. Both return `404` `NotFound` for an id that isn't 32 lowercase hex characters or isn't known. Fields, statuses, and how to expose them are in [Payment links and the pay page](pay-page.md).
 
+### `POST /dev/simulate-payment` (testnet test hook)
+
+Off unless `ZCASH_DEV_SIMULATED_PAYMENTS=true` on testnet with no `LIGHTWALLETD_URL`; otherwise `404`. Body `{"address": "<issued address>", "amount": "0.2"}`. Records a fake mined receipt of `amount` ZEC for that address, then queues the normal webhook. Returns `{"txid": "...", "total_received": "0.20000000"}`. It exists so store plugins can be tested end to end without a chain or funds. Never enable it on a service that takes real orders: anyone who can reach it can mark an address paid.
+
 ## Webhook
 
 This is a request the service sends, not a route it serves. `spawn_webhook_delivery_worker` starts the loop only when both `webhook_url` and `webhook_secret` are set.
@@ -178,6 +182,7 @@ Delivery outcomes are in the [integration guide](integration.md#retries). On sta
 | `ZCASH_WEBHOOK_URL` | unset | Absolute `http` or `https` URL with a host. |
 | `ZCASH_WEBHOOK_SECRET` | unset | HMAC key. Delivery runs only when this and the URL are both set. |
 | `PUBLIC_BASE_URL` | unset | Absolute `http(s)` URL with an optional path prefix and no query or fragment; trailing `/` removed. Prefix for `pay_url`. See [Payment links](pay-page.md#exposing-the-page). |
+| `ZCASH_DEV_SIMULATED_PAYMENTS` | `false` | `true`/`false`/`1`/`0`. Enables `POST /dev/simulate-payment`. Rejected unless `ZCASH_NETWORK=testnet` and `LIGHTWALLETD_URL` is unset (no real scanning runs alongside it). For tests only. A database that ever recorded a simulated payment is marked, and the service refuses to start on it with `LIGHTWALLETD_URL` set; use a fresh database for real scanning. |
 | `RETURN_URL_ALLOWED_ORIGINS` | unset | Comma-separated `http(s)` origins (no path) a session's `return_url` must match. Unset allows any `http(s)` URL. See [Payment links](pay-page.md). |
 | `WEBHOOK_POLL_INTERVAL_SECONDS` | `2` | `u64`, greater than 0. |
 | `WEBHOOK_RETRY_DELAY_SECONDS` | `30` | `u64`, greater than 0. Base of the exponential backoff. |
@@ -203,6 +208,9 @@ A value that fails its parse or range check returns `InvalidConfig` and the proc
 - `ZCASH_WEBHOOK_URL must use http or https; got ...`
 - `ZCASH_WEBHOOK_URL must include a host; got ...`
 - the same four messages for `PUBLIC_BASE_URL`, plus `PUBLIC_BASE_URL must not include a query or fragment; got ...`
+- `ZCASH_DEV_SIMULATED_PAYMENTS must be 'true' or 'false'`
+- `ZCASH_DEV_SIMULATED_PAYMENTS is only allowed with ZCASH_NETWORK=testnet`
+- `ZCASH_DEV_SIMULATED_PAYMENTS cannot be combined with LIGHTWALLETD_URL`
 
 Setting the URL without the secret, or the secret without the URL, is allowed. The webhook worker stays off.
 

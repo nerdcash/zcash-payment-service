@@ -26,7 +26,7 @@ use crate::{
     error::AppError,
     logging::init_logging,
     pay_page::pay_page,
-    service::{health, payment_session, payment_status, PaymentService},
+    service::{health, payment_session, payment_status, simulate_payment, PaymentService},
     wallet_runtime::spawn_wallet_sync_worker,
     webhook_delivery::spawn_webhook_delivery_worker,
 };
@@ -61,6 +61,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/payment-session", post(payment_session))
         .route("/payments/{payment_id}", get(payment_status))
         .route("/pay/{payment_id}", get(pay_page))
+        .route("/dev/simulate-payment", post(simulate_payment))
         .with_state(state)
 }
 

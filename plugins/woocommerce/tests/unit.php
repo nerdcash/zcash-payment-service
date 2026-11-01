@@ -1,0 +1,73 @@
+<?php
+// Plain-PHP unit tests for the dependency-free helpers. Run: php plugins/woocommerce/tests/unit.php
+define( 'ABSPATH', __DIR__ );
+require __DIR__ . '/../zcash-payment-gateway/includes/class-zcash-pg-util.php';
+
+$failures = 0;
+function check( string $name, $actual, $expected ): void {
+	global $failures;
+	if ( $actual === $expected ) {
+		echo "ok   $name\n";
+	} else {
+		$failures++;
+		echo "FAIL $name: expected " . var_export( $expected, true ) . ', got ' . var_export( $actual, true ) . "\n";
+	}
+}
+
+check( 'zec 0.12345678', Zcash_PG_Util::zec_to_zat( '0.12345678' ), 12345678 );
+check( 'zec 1', Zcash_PG_Util::zec_to_zat( '1' ), 100000000 );
+check( 'zec .5', Zcash_PG_Util::zec_to_zat( '.5' ), 50000000 );
+check( 'zec 2.', Zcash_PG_Util::zec_to_zat( '2.' ), 200000000 );
+check( 'zec 9 decimals', Zcash_PG_Util::zec_to_zat( '0.123456789' ), null );
+check( 'zec negative', Zcash_PG_Util::zec_to_zat( '-1' ), null );
+check( 'zec empty', Zcash_PG_Util::zec_to_zat( '' ), null );
+check( 'zec dot', Zcash_PG_Util::zec_to_zat( '.' ), null );
+check( 'zec exponent', Zcash_PG_Util::zec_to_zat( '1e3' ), null );
+check( 'zec huge', Zcash_PG_Util::zec_to_zat( '99999999999999' ), null );
+
+check( 'fmt', Zcash_PG_Util::zat_to_zec( 12345678 ), '0.12345678' );
+check( 'fmt whole', Zcash_PG_Util::zat_to_zec( 250000000 ), '2.50000000' );
+
+check( 'total ZEC store', Zcash_PG_Util::order_total_to_zat( '1.25', 'ZEC', '' ), 125000000 );
+check( 'total USD rate', Zcash_PG_Util::order_total_to_zat( '40.00', 'USD', '0.025' ), 100000000 );
+check( 'total rounds up', Zcash_PG_Util::order_total_to_zat( '1', 'USD', '0.000000015' ), 2 );
+check( 'total no rate', Zcash_PG_Util::order_total_to_zat( '40.00', 'USD', '' ), null );
+check( 'total zero rate', Zcash_PG_Util::order_total_to_zat( '40.00', 'USD', '0' ), null );
+
+$secret = 'test-secret';
+$body   = '{"event_id":"zcash:7:v3","payment_source":"zcash","address":"utest1abc","total_received":"0.50000000","observed_at":"2026-10-31T00:00:00Z"}';
+$sig    = hash_hmac( 'sha256', $body, $secret );
+check( 'sig ok', Zcash_PG_Util::verify_signature( $body, $sig, $secret ), true );
+check( 'sig uppercase ok', Zcash_PG_Util::verify_signature( $body, strtoupper( $sig ), $secret ), true );
+check( 'sig tampered body', Zcash_PG_Util::verify_signature( $body . ' ', $sig, $secret ), false );
+check( 'sig wrong secret', Zcash_PG_Util::verify_signature( $body, $sig, 'other' ), false );
+check( 'sig missing', Zcash_PG_Util::verify_signature( $body, null, $secret ), false );
+check( 'sig empty secret', Zcash_PG_Util::verify_signature( $body, hash_hmac( 'sha256', $body, '' ), '' ), false );
+check( 'sig malformed', Zcash_PG_Util::verify_signature( $body, 'zz', $secret ), false );
+
+check(
+	'parse',
+	Zcash_PG_Util::parse_observation( $body ),
+	array(
+		'event_id'       => 'zcash:7:v3',
+		'address'        => 'utest1abc',
+		'total_received' => '0.50000000',
+		'total_zat'      => 50000000,
+		'state_version'  => 3,
+	)
+);
+check( 'parse wrong source', Zcash_PG_Util::parse_observation( str_replace( '"zcash"', '"btc"', $body ) ), null );
+check( 'parse no version', Zcash_PG_Util::parse_observation( str_replace( ':v3', '', $body ) ), null );
+check( 'parse not json', Zcash_PG_Util::parse_observation( 'nope' ), null );
+
+check( 'pay url absolute', Zcash_PG_Util::resolve_pay_url( 'https://pay.example/pay/abc', '' ), 'https://pay.example/pay/abc' );
+check( 'pay url relative + base', Zcash_PG_Util::resolve_pay_url( '/pay/abc', 'https://pay.example/' ), 'https://pay.example/pay/abc' );
+check( 'pay url relative no base', Zcash_PG_Util::resolve_pay_url( '/pay/abc', '' ), null );
+check( 'pay url empty', Zcash_PG_Util::resolve_pay_url( '', 'https://pay.example' ), null );
+check( 'pay url bad base', Zcash_PG_Util::resolve_pay_url( '/pay/abc', 'javascript:alert(1)' ), null );
+
+if ( $failures > 0 ) {
+	echo "$failures failure(s)\n";
+	exit( 1 );
+}
+echo "all passed\n";
