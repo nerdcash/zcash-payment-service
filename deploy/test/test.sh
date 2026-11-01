@@ -23,8 +23,9 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 code() { curl -s -o /dev/null -w '%{http_code}' --cacert "$work/root.crt" "$@"; }
 
 echo "--- the private API is published on loopback only"
-# Checked on compose.yml itself, whatever overrides the test runs with.
-docker compose -f compose.yml --env-file test/test.env config --format json | grep -q '"host_ip": "127.0.0.1"' || fail "private API port is not bound to 127.0.0.1"
+# Checked on compose.yml itself, whatever overrides the test runs with, and with
+# PRIVATE_API_BIND cleared so the check exercises compose.yml's default, not test.env's value.
+PRIVATE_API_BIND= docker compose -f compose.yml --env-file test/test.env config --format json | grep -q '"host_ip": "127.0.0.1"' || fail "private API port is not bound to 127.0.0.1"
 
 dc up -d --wait ${E2E_UP_ARGS:-}
 dc exec -T caddy cat /data/caddy/pki/authorities/local/root.crt > "$work/root.crt"
