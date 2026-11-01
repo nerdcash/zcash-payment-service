@@ -1,9 +1,16 @@
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
+use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::Config,
-    db::{AppDb, AtomicFreshAddressAllocation, OwnedAddressReceiver, OwnedIssuedAddress},
+    config::{validate_return_url, Config},
+    db::{
+        format_zat_as_zec, AppDb, AtomicFreshAddressAllocation, OwnedAddressReceiver,
+        OwnedIssuedAddress,
+    },
     error::AppError,
     wallet_db::{initialize_wallet_db, read_wallet_db_identity},
     zcash::WalletView,
@@ -13,6 +20,8 @@ use crate::{
 pub struct PaymentService {
     app_db: AppDb,
     wallet_view: WalletView,
+    public_base_url: Option<String>,
+    return_url_allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -22,12 +31,48 @@ pub struct PaymentSessionRequest {
     pub memo: Option<String>,
     pub message: Option<String>,
     pub amount: Option<String>,
+    /// Where the hosted pay page sends the payer once the payment is seen.
+    pub return_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct PaymentSessionResponse {
     pub address: String,
     pub qr_text: String,
+    /// Unguessable id for the hosted pay page and the status route.
+    pub payment_id: String,
+    /// Link to the hosted pay page. Absolute when `PUBLIC_BASE_URL` is set, otherwise a path.
+    pub pay_url: String,
+}
+
+/// Where a payment link stands, judged against the requested amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentStatus {
+    /// Nothing eligible has arrived yet.
+    AwaitingPayment,
+    /// Something arrived, but less than the requested amount.
+    PartiallyPaid,
+    /// The eligible total covers the requested amount.
+    Paid,
+    /// Something arrived, and the request had no amount the service can compare with.
+    Received,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PaymentStatusResponse {
+    pub payment_id: String,
+    pub address: String,
+    pub qr_text: String,
+    pub pay_url: String,
+    pub label: Option<String>,
+    pub message: Option<String>,
+    pub amount: Option<String>,
+    pub total_received: String,
+    pub state_version: i64,
+    pub status: PaymentStatus,
+    pub return_url: Option<String>,
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,6 +114,8 @@ impl PaymentService {
         Ok(Self {
             app_db,
             wallet_view,
+            public_base_url: config.public_base_url.clone(),
+            return_url_allowed_origins: config.return_url_allowed_origins.clone(),
         })
     }
 
@@ -82,13 +129,23 @@ impl PaymentService {
             ));
         }
 
+        let return_url = request
+            .return_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(return_url) = return_url {
+            validate_return_url(return_url, &self.return_url_allowed_origins)
+                .map_err(AppError::InvalidRequest)?;
+        }
+
         tracing::info!(
             label = request.label.as_deref().unwrap_or_default(),
             amount = request.amount.as_deref().unwrap_or_default(),
             "received payment-session request"
         );
 
-        let address = self.mint_address(
+        let (address_id, address) = self.mint_address(
             request.label.as_deref(),
             request.memo.as_deref(),
             request.message.as_deref(),
@@ -102,9 +159,64 @@ impl PaymentService {
             request.message.as_deref(),
         );
 
-        tracing::info!(address, "issued payment session");
+        let payment_id = new_payment_id();
+        self.app_db
+            .insert_payment_link(&payment_id, address_id, return_url)?;
+        let pay_url = self.pay_url(&payment_id);
 
-        Ok(PaymentSessionResponse { address, qr_text })
+        tracing::info!(address, payment_id, "issued payment session");
+
+        Ok(PaymentSessionResponse {
+            address,
+            qr_text,
+            payment_id,
+            pay_url,
+        })
+    }
+
+    fn pay_url(&self, payment_id: &str) -> String {
+        format!(
+            "{}/pay/{payment_id}",
+            self.public_base_url.as_deref().unwrap_or_default()
+        )
+    }
+
+    /// Current state of a payment link, or `NotFound` for an unknown id.
+    pub fn payment_status(&self, payment_id: &str) -> Result<PaymentStatusResponse, AppError> {
+        let not_found = || AppError::NotFound("unknown payment".into());
+        if !is_payment_id(payment_id) {
+            return Err(not_found());
+        }
+        let record = self
+            .app_db
+            .find_payment_link(payment_id)?
+            .ok_or_else(not_found)?;
+        let amount = record
+            .requested_amount
+            .clone()
+            .filter(|value| !value.trim().is_empty());
+        let status = payment_status_for(amount.as_deref(), record.current_total_zat);
+        // After a partial payment, request only what is still owed so rescanning does not overpay.
+        let request_amount = remaining_amount(amount.as_deref(), record.current_total_zat);
+        Ok(PaymentStatusResponse {
+            qr_text: build_qr_text(
+                &record.unified_address,
+                request_amount.as_deref(),
+                record.request_memo.as_deref(),
+                record.request_message.as_deref(),
+            ),
+            pay_url: self.pay_url(&record.payment_id),
+            payment_id: record.payment_id,
+            address: record.unified_address,
+            label: record.request_label,
+            message: record.request_message,
+            amount,
+            total_received: format_zat_as_zec(record.current_total_zat),
+            state_version: record.state_version,
+            status,
+            return_url: record.return_url,
+            created_at: record.created_at,
+        })
     }
 
     fn mint_address(
@@ -113,7 +225,7 @@ impl PaymentService {
         memo: Option<&str>,
         message: Option<&str>,
         amount: Option<&str>,
-    ) -> Result<String, AppError> {
+    ) -> Result<(i64, String), AppError> {
         let record = self.app_db.allocate_fresh_address(|last_index| {
             let derived = self.wallet_view.derive_address_after(last_index)?;
 
@@ -149,7 +261,7 @@ impl PaymentService {
         })?;
 
         tracing::info!(address = %record.unified_address, "minted fresh unified address from canonical UIVK");
-        Ok(record.unified_address)
+        Ok((record.address_id, record.unified_address))
     }
 
     pub fn health_response(&self) -> Result<HealthResponse, AppError> {
@@ -175,6 +287,75 @@ pub async fn payment_session(
     Ok(Json(state.service.issue_payment_session(request)?))
 }
 
+pub async fn payment_status(
+    State(state): State<AppState>,
+    Path(payment_id): Path<String>,
+) -> Result<Json<PaymentStatusResponse>, AppError> {
+    Ok(Json(state.service.payment_status(&payment_id)?))
+}
+
+/// Parses a ZEC decimal such as `0.12345678` into zatoshis.
+/// Returns `None` for anything else, including more than 8 decimal places.
+pub fn parse_zec_amount(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if whole.is_empty() && fraction.is_empty() {
+        return None;
+    }
+    if fraction.len() > 8
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let whole: i64 = if whole.is_empty() {
+        0
+    } else {
+        whole.parse().ok()?
+    };
+    let fraction: i64 = if fraction.is_empty() {
+        0
+    } else {
+        format!("{fraction:0<8}").parse().ok()?
+    };
+    whole.checked_mul(100_000_000)?.checked_add(fraction)
+}
+
+pub fn payment_status_for(amount: Option<&str>, total_zat: i64) -> PaymentStatus {
+    match amount.and_then(parse_zec_amount) {
+        Some(requested) if total_zat >= requested => PaymentStatus::Paid,
+        _ if total_zat <= 0 => PaymentStatus::AwaitingPayment,
+        Some(_) => PaymentStatus::PartiallyPaid,
+        None => PaymentStatus::Received,
+    }
+}
+
+/// 128 random bits as 32 lowercase hex characters.
+fn new_payment_id() -> String {
+    let mut bytes = [0u8; 16];
+    UnwrapErr(SysRng).fill_bytes(&mut bytes);
+    hex_string(&bytes)
+}
+
+pub fn is_payment_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// The amount still owed, as ZEC text: the requested amount when nothing (or everything) has been
+/// received, otherwise the requested amount minus what was received.
+pub fn remaining_amount(requested: Option<&str>, received_zat: i64) -> Option<String> {
+    let requested_text = requested?;
+    match parse_zec_amount(requested_text) {
+        Some(requested_zat) if received_zat > 0 && received_zat < requested_zat => {
+            Some(format_zat_as_zec(requested_zat - received_zat))
+        }
+        _ => Some(requested_text.to_string()),
+    }
+}
+
 pub fn build_qr_text(
     address: &str,
     amount: Option<&str>,
@@ -186,7 +367,8 @@ pub fn build_qr_text(
         query.push(format!("amount={}", encode_uri_component(amount)));
     }
     if let Some(memo) = memo.filter(|value| !value.trim().is_empty()) {
-        query.push(format!("memo={}", encode_uri_component(memo)));
+        // ZIP-321 carries the memo as unpadded base64url of its bytes.
+        query.push(format!("memo={}", base64url_unpadded(memo.as_bytes())));
     }
     if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
         query.push(format!("message={}", encode_uri_component(message)));
@@ -197,6 +379,20 @@ pub fn build_qr_text(
     } else {
         format!("zcash:{address}?{}", query.join("&"))
     }
+}
+
+fn base64url_unpadded(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for index in 0..=chunk.len() {
+            out.push(ALPHABET[((n >> (18 - 6 * index)) & 63) as usize] as char);
+        }
+    }
+    out
 }
 
 fn encode_uri_component(value: &str) -> String {
@@ -243,8 +439,15 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{build_qr_text, HealthResponse, PaymentService, PaymentSessionRequest};
-    use crate::config::Config;
+    use super::{
+        build_qr_text, is_payment_id, parse_zec_amount, payment_status_for, HealthResponse,
+        PaymentService, PaymentSessionRequest, PaymentStatus,
+    };
+    use crate::{
+        config::Config,
+        db::{AttributedScannedReceipt, ReceiptKind},
+        error::AppError,
+    };
 
     const MAINNET_UIVK_NO_TRANSPARENT: &str = "uivk1020vq9j5zeqxh303sxa0zv2hn9wm9fev8x0p8yqxdwyzde9r4c90fcglc63usj0ycl2scy8zxuhtser0qrq356xfy8x3vyuxu7f6gas75svl9v9m3ctuazsu0ar8e8crtx7x6zgh4kw8xm3q4rlkpm9er2wefxhhf9pn547gpuz9vw27gsdp6c03nwlrxgzhr2g6xek0x8l5avrx9ue9lf032tr7kmhqf3nfdxg7ldfgx6yf09g";
     fn config(temp: &Path) -> Config {
@@ -269,7 +472,26 @@ mod tests {
             webhook_max_attempts: 8,
             webhook_report_confirmations: 1,
             finality_confirmations: 100,
+            public_base_url: None,
+            return_url_allowed_origins: Vec::new(),
         }
+    }
+
+    #[test]
+    fn remaining_amount_subtracts_partial_payments() {
+        assert_eq!(
+            super::remaining_amount(Some("0.5"), 0).as_deref(),
+            Some("0.5")
+        );
+        assert_eq!(
+            super::remaining_amount(Some("0.5"), 20_000_000).as_deref(),
+            Some("0.30000000")
+        );
+        assert_eq!(
+            super::remaining_amount(Some("0.5"), 50_000_000).as_deref(),
+            Some("0.5")
+        );
+        assert_eq!(super::remaining_amount(None, 1), None);
     }
 
     #[test]
@@ -286,7 +508,7 @@ mod tests {
                 Some("Invoice INV-1001"),
                 Some("Thanks for your purchase."),
             ),
-            "zcash:uaddr?amount=0.12345678&memo=Invoice%20INV-1001&message=Thanks%20for%20your%20purchase."
+            "zcash:uaddr?amount=0.12345678&memo=SW52b2ljZSBJTlYtMTAwMQ&message=Thanks%20for%20your%20purchase."
         );
     }
 
@@ -301,6 +523,7 @@ mod tests {
                 memo: None,
                 message: None,
                 amount: None,
+                return_url: None,
             })
             .unwrap();
 
@@ -311,6 +534,7 @@ mod tests {
                 memo: None,
                 message: None,
                 amount: None,
+                return_url: None,
             })
             .unwrap();
 
@@ -328,6 +552,7 @@ mod tests {
                 memo: None,
                 message: None,
                 amount: None,
+                return_url: None,
             })
             .unwrap();
 
@@ -348,6 +573,7 @@ mod tests {
                 memo: None,
                 message: None,
                 amount: None,
+                return_url: None,
             })
             .unwrap();
 
@@ -406,6 +632,7 @@ mod tests {
                             memo: None,
                             message: None,
                             amount: None,
+                            return_url: None,
                         })
                         .unwrap()
                         .address
@@ -438,5 +665,237 @@ mod tests {
         assert_eq!(response.current_sync_state, "catching_up");
         assert_eq!(response.detected_tip_height, Some(321));
         assert_eq!(response.last_scanned_height, Some(300));
+    }
+
+    fn session_request(amount: Option<&str>, return_url: Option<&str>) -> PaymentSessionRequest {
+        PaymentSessionRequest {
+            payment_source: "zcash".into(),
+            label: Some("Order 42".into()),
+            memo: None,
+            message: Some("Thanks <3".into()),
+            amount: amount.map(Into::into),
+            return_url: return_url.map(Into::into),
+        }
+    }
+
+    fn credit(service: &PaymentService, address: &str, uid: &str, value_zat: i64) {
+        let address_id = service
+            .app_db
+            .find_issued_address(address)
+            .unwrap()
+            .unwrap()
+            .address_id;
+        service
+            .app_db
+            .apply_attributed_receipts(
+                &[AttributedScannedReceipt {
+                    address_id,
+                    txid_hex: format!("tx-{uid}"),
+                    pool: "orchard".into(),
+                    receipt_uid: uid.into(),
+                    value_zat,
+                    mined_height: 100,
+                    confirmation_depth: 5,
+                    eligible_for_webhook: true,
+                    receipt_kind: ReceiptKind::Mined,
+                    first_observed_at: "2026-01-01T00:00:00Z".into(),
+                    last_observed_at: "2026-01-01T00:00:00Z".into(),
+                }],
+                104,
+                100,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn parses_zec_amounts() {
+        assert_eq!(parse_zec_amount("0.12345678"), Some(12_345_678));
+        assert_eq!(parse_zec_amount("1"), Some(100_000_000));
+        assert_eq!(parse_zec_amount("1.5"), Some(150_000_000));
+        assert_eq!(parse_zec_amount(".5"), Some(50_000_000));
+        assert_eq!(parse_zec_amount(" 2.00000001 "), Some(200_000_001));
+        assert_eq!(parse_zec_amount("0.123456789"), None);
+        assert_eq!(parse_zec_amount("-1"), None);
+        assert_eq!(parse_zec_amount("1e3"), None);
+        assert_eq!(parse_zec_amount("."), None);
+        assert_eq!(parse_zec_amount(""), None);
+        assert_eq!(parse_zec_amount("99999999999999999999"), None);
+    }
+
+    #[test]
+    fn status_compares_total_with_requested_amount() {
+        use PaymentStatus::*;
+        assert_eq!(payment_status_for(Some("0.5"), 0), AwaitingPayment);
+        assert_eq!(payment_status_for(Some("0.5"), 10), PartiallyPaid);
+        assert_eq!(payment_status_for(Some("0.5"), 50_000_000), Paid);
+        assert_eq!(payment_status_for(Some("0.5"), 60_000_000), Paid);
+        assert_eq!(payment_status_for(None, 0), AwaitingPayment);
+        assert_eq!(payment_status_for(None, 1), Received);
+        assert_eq!(payment_status_for(Some("about 1 ZEC"), 1), Received);
+    }
+
+    #[test]
+    fn sessions_get_unguessable_payment_ids_and_pay_urls() {
+        let temp = tempdir().unwrap();
+        let service = PaymentService::initialize(config(temp.path())).unwrap();
+        let first = service
+            .issue_payment_session(session_request(Some("0.5"), None))
+            .unwrap();
+        let second = service
+            .issue_payment_session(session_request(Some("0.5"), None))
+            .unwrap();
+        assert!(is_payment_id(&first.payment_id));
+        assert_ne!(first.payment_id, second.payment_id);
+        assert_eq!(first.pay_url, format!("/pay/{}", first.payment_id));
+
+        let mut with_base = config(temp.path());
+        with_base.public_base_url = Some("https://pay.example.com/zec".into());
+        let service = PaymentService::initialize(with_base).unwrap();
+        let third = service
+            .issue_payment_session(session_request(None, None))
+            .unwrap();
+        assert_eq!(
+            third.pay_url,
+            format!("https://pay.example.com/zec/pay/{}", third.payment_id)
+        );
+    }
+
+    #[test]
+    fn enforces_return_url_allowed_origins() {
+        let temp = tempdir().unwrap();
+        let mut restricted = config(temp.path());
+        restricted.return_url_allowed_origins = vec!["https://shop.example".into()];
+        let service = PaymentService::initialize(restricted).unwrap();
+        service
+            .issue_payment_session(session_request(None, Some("https://shop.example/o/1")))
+            .unwrap();
+        let error = service
+            .issue_payment_session(session_request(None, Some("https://evil.example/")))
+            .unwrap_err();
+        assert!(
+            matches!(error, AppError::InvalidRequest(ref text) if text.starts_with("return_url"))
+        );
+    }
+
+    #[test]
+    fn rejects_return_urls_that_are_not_absolute_http() {
+        let temp = tempdir().unwrap();
+        let service = PaymentService::initialize(config(temp.path())).unwrap();
+        for bad in [
+            "/thanks",
+            "javascript:alert(1)",
+            "data:text/html,x",
+            "ftp://example.com/x",
+            "https://shop.example@evil.example/",
+        ] {
+            let error = service
+                .issue_payment_session(session_request(None, Some(bad)))
+                .unwrap_err();
+            assert!(
+                matches!(error, AppError::InvalidRequest(ref text) if text.starts_with("return_url")),
+                "{bad}: {error}"
+            );
+        }
+        service
+            .issue_payment_session(session_request(None, Some("  ")))
+            .unwrap();
+    }
+
+    #[test]
+    fn payment_status_tracks_received_total() {
+        let temp = tempdir().unwrap();
+        let service = PaymentService::initialize(config(temp.path())).unwrap();
+        let session = service
+            .issue_payment_session(session_request(
+                Some("0.5"),
+                Some("https://shop.example/thanks?order=42"),
+            ))
+            .unwrap();
+
+        let status = service.payment_status(&session.payment_id).unwrap();
+        assert_eq!(status.status, PaymentStatus::AwaitingPayment);
+        assert_eq!(status.address, session.address);
+        assert_eq!(status.qr_text, session.qr_text);
+        assert_eq!(status.amount.as_deref(), Some("0.5"));
+        assert_eq!(status.total_received, "0.00000000");
+        assert_eq!(
+            status.return_url.as_deref(),
+            Some("https://shop.example/thanks?order=42")
+        );
+
+        credit(&service, &session.address, "a", 20_000_000);
+        let status = service.payment_status(&session.payment_id).unwrap();
+        assert_eq!(status.status, PaymentStatus::PartiallyPaid);
+        assert_eq!(status.total_received, "0.20000000");
+        assert_eq!(status.state_version, 1);
+
+        credit(&service, &session.address, "b", 30_000_000);
+        let status = service.payment_status(&session.payment_id).unwrap();
+        assert_eq!(status.status, PaymentStatus::Paid);
+        assert_eq!(status.total_received, "0.50000000");
+    }
+
+    #[test]
+    fn unknown_or_malformed_payment_ids_are_not_found() {
+        let temp = tempdir().unwrap();
+        let service = PaymentService::initialize(config(temp.path())).unwrap();
+        for id in ["0123456789abcdef0123456789abcdef", "nope", "../../etc"] {
+            assert!(matches!(
+                service.payment_status(id).unwrap_err(),
+                AppError::NotFound(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn router_serves_status_json_and_pay_page() {
+        let temp = tempdir().unwrap();
+        let service = Arc::new(PaymentService::initialize(config(temp.path())).unwrap());
+        let session = service
+            .issue_payment_session(session_request(
+                Some("0.5"),
+                Some("https://shop.example/done"),
+            ))
+            .unwrap();
+        let app = crate::build_router(crate::AppState {
+            service: service.clone(),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = reqwest::Client::new();
+
+        let status: serde_json::Value = http
+            .get(format!("{base}/payments/{}", session.payment_id))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status["status"], "awaiting_payment");
+        assert_eq!(status["address"], session.address.as_str());
+
+        let page = http
+            .get(format!("{base}{}", session.pay_url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(page.status(), 200);
+        let csp = page.headers()["content-security-policy"].to_str().unwrap();
+        assert!(csp.contains("connect-src 'self'"));
+        let html = page.text().await.unwrap();
+        assert!(html.contains("<svg"));
+        assert!(html.contains("Thanks &lt;3"));
+        assert!(!html.contains("Thanks <3"));
+        assert!(html.contains("https://shop.example/done"));
+        assert!(html.contains(&session.address));
+
+        let missing = http
+            .get(format!("{base}/pay/0123456789abcdef0123456789abcdef"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), 404);
     }
 }

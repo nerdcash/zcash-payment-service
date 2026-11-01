@@ -4,6 +4,7 @@ A small Node.js client for [zcash-payment-service](https://github.com/nerdcash/z
 It has no runtime dependencies beyond Node's built-in `node:crypto`.
 
 - `createPaymentSession` asks the service for a fresh unified address and the `zcash:` URI to show as a QR code.
+- `getPayment` reads a payment link's status (`awaiting_payment`, `partially_paid`, `paid`, or `received`) for display.
 - `verifyWebhook` checks the HMAC-SHA256 `X-Signature` on a payment observation the service posts to your store, then validates and returns the payload.
 
 Your store still owns prices, orders, and the decision of when an order counts as paid.
@@ -15,6 +16,8 @@ npm install @nerdcash/zcash-payment-client
 ```
 
 Requires Node.js 20 or later. The package is ESM-only and ships TypeScript types.
+
+`returnUrl`, `payment_id`, `pay_url`, and `getPayment` need a service that has payment links (the first `main` image after 0.1.x of this client). Against an older service, `payment_id` and `pay_url` are simply absent.
 
 ## Usage
 
@@ -41,6 +44,8 @@ const session = await payments.createPaymentSession({
 });
 // session.address -> show to the customer
 // session.qr_text -> render as a QR code (see "Rendering the QR code" below)
+// or redirect to the service's hosted pay page instead:
+// session.pay_url -> pass returnUrl: "https://shop.example/orders/123" to come back afterwards
 
 // Webhook: verify against the *raw* request body.
 const app = express();

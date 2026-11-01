@@ -33,7 +33,9 @@ Older images and client versions don't receive backported fixes. Upgrade to get 
   treat deliveries idempotently: keep the highest `state_version` applied per address, as the
   [API reference](https://nerdcash.github.io/zcash-payment-service/api.html#webhook) describes.
 - **The HTTP API has no authentication.** Expose it only to your application, never to the
-  public internet.
+  public internet. The pay page routes (`GET /pay/*` and `GET /payments/*`) are the exception:
+  they are meant for payers, are keyed by an unguessable payment id, and can be published on
+  their own through a reverse proxy.
 - **Operators are responsible for their host.** That includes keeping the UIVK, the webhook
   secret, and the data directory private, choosing a trustworthy lightwalletd server, and
   keeping the image and host patched.

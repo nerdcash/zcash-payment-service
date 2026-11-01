@@ -36,6 +36,11 @@ pub struct Config {
     pub webhook_max_attempts: u32,
     pub webhook_report_confirmations: u32,
     pub finality_confirmations: u32,
+    /// Public origin (and optional path prefix) where payers reach the pay page.
+    pub public_base_url: Option<String>,
+    /// Origins (`scheme://host[:port]`) a session's `return_url` may point to. Empty allows any
+    /// `http(s)` URL.
+    pub return_url_allowed_origins: Vec<String>,
 }
 
 impl Config {
@@ -87,6 +92,17 @@ impl Config {
         if let Some(webhook_url) = webhook_url.as_deref() {
             validate_webhook_url(webhook_url)?;
         }
+        let public_base_url = env::var("PUBLIC_BASE_URL")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(public_base_url) = public_base_url.as_deref() {
+            validate_public_base_url(public_base_url).map_err(AppError::InvalidConfig)?;
+        }
+        let return_url_allowed_origins = env::var("RETURN_URL_ALLOWED_ORIGINS")
+            .map(|value| parse_allowed_origins(&value))
+            .unwrap_or_else(|_| Ok(Vec::new()))
+            .map_err(AppError::InvalidConfig)?;
         let webhook_secret = env::var("ZCASH_WEBHOOK_SECRET")
             .ok()
             .map(|value| value.trim().to_string())
@@ -265,6 +281,8 @@ impl Config {
             webhook_max_attempts,
             webhook_report_confirmations,
             finality_confirmations,
+            public_base_url,
+            return_url_allowed_origins,
         })
     }
 }
@@ -292,36 +310,133 @@ fn parse_scan_parallelism(value: Option<&str>, default: usize) -> Result<usize, 
 }
 
 fn validate_webhook_url(webhook_url: &str) -> Result<(), AppError> {
-    let uri = webhook_url.parse::<Uri>().map_err(|error| {
-        AppError::InvalidConfig(format!(
-            "ZCASH_WEBHOOK_URL must be a valid absolute http(s) URL; got {webhook_url}: {error}"
-        ))
+    validate_http_url("ZCASH_WEBHOOK_URL", webhook_url).map_err(AppError::InvalidConfig)
+}
+
+/// Checks that `value` is an absolute `http` or `https` URL with a host.
+/// The error text names the setting or field so it can be reported as-is.
+/// `PUBLIC_BASE_URL` is a prefix that `/pay/<id>` is appended to, so it may hold an origin and a
+/// path but no query or fragment.
+pub fn validate_public_base_url(value: &str) -> Result<(), String> {
+    validate_http_url("PUBLIC_BASE_URL", value)?;
+    if value.contains('?') || value.contains('#') {
+        return Err(format!(
+            "PUBLIC_BASE_URL must not include a query or fragment; got {value}"
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_http_url(name: &str, value: &str) -> Result<(), String> {
+    let uri = value.parse::<Uri>().map_err(|error| {
+        format!("{name} must be a valid absolute http(s) URL; got {value}: {error}")
     })?;
 
-    let scheme = uri.scheme_str().ok_or_else(|| {
-        AppError::InvalidConfig(format!(
-            "ZCASH_WEBHOOK_URL must be an absolute http(s) URL; got {webhook_url}"
-        ))
-    })?;
+    let scheme = uri
+        .scheme_str()
+        .ok_or_else(|| format!("{name} must be an absolute http(s) URL; got {value}"))?;
 
     if scheme != "http" && scheme != "https" {
-        return Err(AppError::InvalidConfig(format!(
-            "ZCASH_WEBHOOK_URL must use http or https; got {webhook_url}"
-        )));
+        return Err(format!("{name} must use http or https; got {value}"));
     }
 
     if uri.authority().is_none() {
-        return Err(AppError::InvalidConfig(format!(
-            "ZCASH_WEBHOOK_URL must include a host; got {webhook_url}"
-        )));
+        return Err(format!("{name} must include a host; got {value}"));
     }
 
     Ok(())
 }
 
+/// Parses a comma-separated list of origins into normalized `scheme://host[:port]` strings.
+pub fn parse_allowed_origins(value: &str) -> Result<Vec<String>, String> {
+    let mut origins = Vec::new();
+    for item in value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let item = item.trim_end_matches('/');
+        validate_http_url("RETURN_URL_ALLOWED_ORIGINS", item)?;
+        let uri = item.parse::<Uri>().map_err(|error| error.to_string())?;
+        if uri.path() != "/" && !uri.path().is_empty() || uri.query().is_some() {
+            return Err(format!(
+                "RETURN_URL_ALLOWED_ORIGINS entries must be origins without a path; got {item}"
+            ));
+        }
+        origins.push(url_origin(&uri)?);
+    }
+    Ok(origins)
+}
+
+/// The normalized origin of an absolute `http(s)` URL: lowercase scheme and host, default
+/// port removed. Rejects URLs with user info, which can disguise the real host.
+pub fn url_origin(uri: &Uri) -> Result<String, String> {
+    let authority = uri
+        .authority()
+        .ok_or_else(|| "URL must include a host".to_string())?;
+    if authority.as_str().contains('@') {
+        return Err("URL must not include user info".to_string());
+    }
+    let scheme = uri.scheme_str().unwrap_or_default().to_ascii_lowercase();
+    let host = authority.host().to_ascii_lowercase();
+    match (scheme.as_str(), authority.port_u16()) {
+        ("http", Some(80)) | ("https", Some(443)) | (_, None) => Ok(format!("{scheme}://{host}")),
+        (_, Some(port)) => Ok(format!("{scheme}://{host}:{port}")),
+    }
+}
+
+/// Checks a session's `return_url`: absolute `http(s)`, no user info, and, when `allowed` is
+/// not empty, on one of those origins.
+pub fn validate_return_url(value: &str, allowed: &[String]) -> Result<(), String> {
+    validate_http_url("return_url", value)?;
+    let uri = value
+        .parse::<Uri>()
+        .map_err(|error| format!("return_url is invalid: {error}"))?;
+    let origin = url_origin(&uri).map_err(|error| format!("return_url: {error}"))?;
+    if !allowed.is_empty() && !allowed.iter().any(|item| item == &origin) {
+        return Err(format!(
+            "return_url origin {origin} is not in RETURN_URL_ALLOWED_ORIGINS"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_scan_parallelism, validate_webhook_url};
+    #[test]
+    fn return_url_allow_list() {
+        use super::{parse_allowed_origins, validate_return_url};
+        let allowed =
+            parse_allowed_origins("https://Shop.Example, http://localhost:8080/").unwrap();
+        assert_eq!(allowed, ["https://shop.example", "http://localhost:8080"]);
+        assert!(validate_return_url("https://shop.example/orders/1?key=x", &allowed).is_ok());
+        assert!(validate_return_url("https://shop.example:443/x", &allowed).is_ok());
+        assert!(validate_return_url("http://localhost:8080/x", &allowed).is_ok());
+        for bad in [
+            "https://evil.example/x",
+            "https://shop.example.evil.example/x",
+            "http://shop.example/x",
+            "https://shop.example@evil.example/x",
+            "http://localhost:8081/x",
+        ] {
+            assert!(validate_return_url(bad, &allowed).is_err(), "{bad}");
+        }
+        assert!(validate_return_url("https://any.example/x", &[]).is_ok());
+        assert!(validate_return_url("https://user@any.example/x", &[]).is_err());
+        assert!(parse_allowed_origins("https://shop.example/path").is_err());
+        assert!(parse_allowed_origins("ftp://shop.example").is_err());
+        assert!(parse_allowed_origins(" , ").unwrap().is_empty());
+    }
+
+    use super::{parse_scan_parallelism, validate_public_base_url, validate_webhook_url};
+
+    #[test]
+    fn public_base_url_rejects_query_and_fragment() {
+        assert!(validate_public_base_url("https://pay.example").is_ok());
+        assert!(validate_public_base_url("https://pay.example/zec").is_ok());
+        assert!(validate_public_base_url("https://pay.example/checkout?lang=en").is_err());
+        assert!(validate_public_base_url("https://pay.example/#x").is_err());
+    }
 
     #[test]
     fn scan_parallelism_defaults_when_unset() {

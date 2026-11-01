@@ -39,6 +39,7 @@ incrementalmerkletree = "0.9"
 rand = { version = "0.10", default-features = false, features = ["std", "sys_rng"] }
 subtle = "2"
 rayon = "1"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [dev-dependencies]
 tempfile = "=3.27.0"

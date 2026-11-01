@@ -13,6 +13,8 @@ services:
       LIGHTWALLETD_URL: ${LIGHTWALLETD_URL:-}
       ZCASH_WEBHOOK_URL: ${ZCASH_WEBHOOK_URL:-}
       ZCASH_WEBHOOK_SECRET: ${ZCASH_WEBHOOK_SECRET:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      RETURN_URL_ALLOWED_ORIGINS: ${RETURN_URL_ALLOWED_ORIGINS:-}
     volumes:
       - ./data:/data/zcash-payment
     restart: unless-stopped

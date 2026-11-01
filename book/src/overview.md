@@ -14,11 +14,11 @@ Two ways to run the same code:
 ## What a payment looks like
 
 1. Your application asks `POST /payment-session` for an address when a checkout starts.
-2. You show the returned `address` and a QR code of `qr_text` to the payer.
+2. You show the returned `address` and a QR code of `qr_text` to the payer, or send them to the service's own [pay page](pay-page.md).
 3. The service downloads compact blocks and mempool transactions from the lightwalletd URL you configure, and decrypts them on your host with keys derived from the UIVK.
 4. When `ZCASH_WEBHOOK_URL` and `ZCASH_WEBHOOK_SECRET` are both set, a change in the eligible total for that address becomes a signed webhook to your application.
 
-The HTTP API is two routes, `GET /health` and `POST /payment-session`. Payment totals leave the process as webhooks. Your application owns prices, invoices, and the decision that a payment is enough.
+The HTTP API is `GET /health`, `POST /payment-session`, and the public pay page routes `GET /pay/{payment_id}` and `GET /payments/{payment_id}`. Payment totals leave the process as webhooks. Your application owns prices, invoices, and the decision that a payment is enough.
 
 ## What the service keeps track of
 
@@ -35,6 +35,6 @@ The current code does all of the following:
 
 A UIVK that also carries a transparent component still decodes. Issued addresses omit a transparent receiver, and the scanner builds Sapling, Orchard, and Ironwood keys only.
 
-The router has no authentication middleware. Put the service on a private network, the way `docker-compose.yml` publishes it on `127.0.0.1`.
+The router has no authentication middleware. Put the service on a private network, the way `docker-compose.yml` publishes it on `127.0.0.1`. To use the pay page, publish only its two routes through a reverse proxy, as [Payment links](pay-page.md#exposing-the-page) shows.
 
 Continue with [Getting started](getting-started.md) to run it, or [Integration guide](integration.md) to wire a checkout.

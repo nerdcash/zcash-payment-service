@@ -3,6 +3,7 @@ pub mod constants;
 pub mod db;
 pub mod error;
 pub mod logging;
+pub mod pay_page;
 pub mod receipt_ingest;
 pub mod scanner;
 pub mod service;
@@ -24,7 +25,8 @@ use crate::{
     db::AppDb,
     error::AppError,
     logging::init_logging,
-    service::{health, payment_session, PaymentService},
+    pay_page::pay_page,
+    service::{health, payment_session, payment_status, PaymentService},
     wallet_runtime::spawn_wallet_sync_worker,
     webhook_delivery::spawn_webhook_delivery_worker,
 };
@@ -57,6 +59,8 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/payment-session", post(payment_session))
+        .route("/payments/{payment_id}", get(payment_status))
+        .route("/pay/{payment_id}", get(pay_page))
         .with_state(state)
 }
 

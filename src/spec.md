@@ -150,6 +150,8 @@ Allocates a Zcash payment destination and returns QR-friendly text.
 - `memo` is optional and informational.
 - `message` is optional and informational.
 - `amount` is optional but expected in most checkout flows.
+- `return_url` is optional. When set it must be an absolute `http` or `https`
+  URL. The hosted pay page sends the payer there once the payment is seen.
 - The service always issues a fresh address for each payment session.
 
 #### `200 OK`
@@ -157,7 +159,9 @@ Allocates a Zcash payment destination and returns QR-friendly text.
 ```json
 {
   "address": "zs1recipientaddress",
-  "qr_text": "zcash:zs1recipientaddress?amount=0.12345678"
+  "qr_text": "zcash:zs1recipientaddress?amount=0.12345678",
+  "payment_id": "3f9c0d6e1b2a4c5d8e7f6a5b4c3d2e1f",
+  "pay_url": "/pay/3f9c0d6e1b2a4c5d8e7f6a5b4c3d2e1f"
 }
 ```
 
@@ -167,6 +171,10 @@ Allocates a Zcash payment destination and returns QR-friendly text.
 - `qr_text` must be a valid Zcash URI suitable for QR encoding.
 - `qr_text` may include URL-encoded `amount`, `memo`, and `message` query
   params.
+- `payment_id` is 128 random bits as lowercase hex. It keys
+  `GET /payments/{payment_id}` (JSON status) and `GET /pay/{payment_id}`
+  (hosted pay page).
+- `pay_url` is the pay page link, prefixed with `PUBLIC_BASE_URL` when set.
 - Fresh address allocation derives a new unified address from the canonical
   UIVK and persists its diversifier metadata and shielded receiver fingerprints
   for Sapling, Orchard, and Ironwood. Ironwood reuses the Orchard receiver.

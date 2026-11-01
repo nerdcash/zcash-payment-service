@@ -125,7 +125,7 @@ services:
 
 `src/spec.md` describes the calling application as the owner of `ZCASH_PAYMENT_SERVICE_BASE_URL`. This binary does not read that variable. From another container on the same Compose network the base URL is `http://zcash-payment-service:8787`.
 
-Give the container the UIVK, the birthday height, and a lightwalletd URL, and keep the volume. The process has no request authentication, so publish the port on an address your application can reach and the public internet cannot.
+Give the container the UIVK, the birthday height, and a lightwalletd URL, and keep the volume. The process has no request authentication, so publish the port on an address your application can reach and the public internet cannot. If you use the [pay page](pay-page.md), forward only `/pay/*` and `/payments/*` to the public through a reverse proxy, set `PUBLIC_BASE_URL`, and set `RETURN_URL_ALLOWED_ORIGINS` to your store's origin.
 
 ## Scan parallelism
 

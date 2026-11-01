@@ -1,7 +1,7 @@
 {
   "name": "@nerdcash/zcash-payment-client",
-  "version": "0.1.1",
-  "description": "Node.js client for zcash-payment-service: create payment sessions and verify signed payment webhooks.",
+  "version": "0.2.0",
+  "description": "Node.js client for zcash-payment-service: create payment sessions, read pay page status, and verify signed payment webhooks.",
   "license": "MIT",
   "type": "module",
   "exports": {

@@ -1160,6 +1160,8 @@ mod tests {
             webhook_max_attempts: 8,
             webhook_report_confirmations: 1,
             finality_confirmations: 100,
+            public_base_url: None,
+            return_url_allowed_origins: Vec::new(),
         }
     }
 
