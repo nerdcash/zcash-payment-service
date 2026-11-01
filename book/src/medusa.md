@@ -11,15 +11,16 @@
 
 Edge cases the plugin handles:
 
-- **Funds drop after capture** (an unconfirmed transaction expires, or a reorg): the plugin sets the order's `zcash_payment_hold` metadata, shows it in the admin widget, and emits `zcash_payment.hold_changed` so your fulfillment code can wait. When the funds return, the hold is cleared. **Releasing a hold never captures again or re-runs order placement or fulfillment.**
-- **Holds you set yourself are kept.** The plugin only clears a hold it placed.
-- **Payment for a canceled order** is never captured. The plugin records it in `zcash_payment_review` metadata, shown in the widget, for you to reconcile.
+- **Funds drop after capture** (an unconfirmed transaction expires, or a reorg): the plugin sets the order's `zcash_payment_hold` metadata, shows it in the admin widget, and emits `zcash_payment.hold_changed` so your fulfillment code can wait. When the funds return and the service confirms the full total, the hold is cleared. **Releasing a hold never captures again or re-runs order placement or fulfillment.**
+- **Holds you set yourself are kept.** If `zcash_payment_hold` already has a value, the plugin leaves it alone, and it only clears the exact message it wrote.
+- **A payment's amount is fixed once its address is issued.** If the cart total changes, start a new payment session; the old address is not reused or re-priced.
+- **Payment for a canceled order** is never captured. The plugin records it in `zcash_payment_review` metadata, shown in the widget, for you to reconcile. If a cancellation lands while a capture is in flight, the order is flagged the same way so you can refund it.
 - **Stale or replayed events** are ignored by their event version. Overlapping deliveries for one session are serialized with Medusa's locking module, and the version is stored only after the update succeeds, so a failed update is retried.
 - **State is kept in session metadata**, which storefront clients can't write, and amounts are converted with exact decimal math.
 
 ## Setup
 
-Requires Medusa 2.x and Node.js 20+.
+Requires Medusa 2.22 or later and Node.js 20+.
 
 1. Run the service as in [Deployment](deployment.md), with `ZCASH_WEBHOOK_URL` pointing at your Medusa server's `/hooks/zcash` route and a random `ZCASH_WEBHOOK_SECRET`. Set `PUBLIC_BASE_URL` and `RETURN_URL_ALLOWED_ORIGINS` (your storefront's origin) as described in [Exposing the page](pay-page.md#exposing-the-page). See the [WooCommerce page](woocommerce.md#setup) for choosing `WEBHOOK_REPORT_CONFIRMATIONS`; the same trade-off applies.
 2. Build and install the plugin. It isn't on npm yet:

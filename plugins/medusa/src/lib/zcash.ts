@@ -57,6 +57,23 @@ export function amountToZat(amount: string, currency: string, zecPerUnit: string
   return zat > 0n ? zat : null
 }
 
+/** Rewrites a JavaScript number string such as "1e-7" or "1.5e+21" as a plain decimal, without rounding. */
+function expandExponent(s: string): string {
+  const m = /^(\d+)(?:\.(\d+))?e([+-]\d+)$/i.exec(s)
+  if (!m) {
+    return s
+  }
+  const digits = m[1] + (m[2] ?? "")
+  const point = m[1].length + Number(m[3])
+  if (point <= 0) {
+    return `0.${"0".repeat(-point)}${digits}`.replace(/\.?0+$/, "")
+  }
+  if (point >= digits.length) {
+    return digits + "0".repeat(point - digits.length)
+  }
+  return `${digits.slice(0, point)}.${digits.slice(point)}`.replace(/\.?0+$/, "")
+}
+
 /** Normalizes a Medusa amount (number, string, or BigNumber) to a plain decimal string. */
 export function amountToString(amount: unknown): string | null {
   let s: string
@@ -64,8 +81,8 @@ export function amountToString(amount: unknown): string | null {
     if (!Number.isFinite(amount) || amount < 0) {
       return null
     }
-    // Avoid exponent notation for small or large numbers.
-    s = amount.toFixed(8).replace(/\.?0+$/, "")
+    // Expand exponent notation exactly; rounding here would undo the round-up in amountToZat.
+    s = expandExponent(String(amount))
   } else if (typeof amount === "string") {
     s = amount.trim()
   } else if (amount && typeof amount === "object") {

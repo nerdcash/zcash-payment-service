@@ -139,14 +139,12 @@ export class ZcashPaymentProviderService extends AbstractPaymentProvider<ZcashOp
       return { data }
     }
     if (data?.address) {
-      const live = await this.client_.status(data.payment_id, data.address)
-      const received = live ? zecToZat(String(live.total_received ?? "")) : null
-      if (received === null || received > 0n) {
-        throw new MedusaError(
-          MedusaError.Types.NOT_ALLOWED,
-          "This payment changed after Zcash funds arrived. Please contact the store."
-        )
-      }
+      // Funds can reach an issued address at any time, even after a zero balance check, and a new
+      // address would orphan them. Refuse; the storefront can start a new payment session instead.
+      throw new MedusaError(
+        MedusaError.Types.NOT_ALLOWED,
+        "This Zcash payment's amount can't change after its address was issued. Start a new payment session."
+      )
     }
     return { data: await this.createSession(input.amount, input.currency_code, input.data) }
   }

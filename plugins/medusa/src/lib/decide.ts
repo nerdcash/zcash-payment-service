@@ -12,6 +12,8 @@ export interface ZcashState {
   received_zat: string
   /** "auto" while the plugin holds a paid order because its funds dropped. */
   hold?: "auto"
+  /** The exact hold message the plugin wrote, so it only ever clears its own hold. */
+  hold_message?: string
   /** Set once funds must be reconciled by hand. Later receipts stay in review too. */
   needs_review?: boolean
 }
@@ -95,6 +97,9 @@ export function readState(metadata: unknown): ZcashState {
   }
   if (raw?.hold === "auto") {
     state.hold = "auto"
+    if (typeof raw.hold_message === "string") {
+      state.hold_message = raw.hold_message
+    }
   }
   if (raw?.needs_review === true) {
     state.needs_review = true

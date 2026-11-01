@@ -177,13 +177,27 @@ async function apply(
       logger.warn(`Zcash payment ${sessionId}: ${decision.message}`)
       await hold(decision.message)
       break
-    case "release":
+    case "release": {
+      // A newer drop may already have happened at the service: release only if it still sees the
+      // full amount, and keep the hold if it can't be asked.
+      const liveZat = await liveTotal()
+      if (liveZat < dueZat) {
+        logger.info(
+          `Zcash payment ${sessionId}: an event reported ${zec} ZEC, but the service now sees ${zatToZec(liveZat)} ZEC. Hold kept.`
+        )
+        return { ok: true, ignored: "superseded" }
+      }
       // Never capture or complete again: that would re-run payment and fulfillment side effects.
-      await setOrderMetadata(orderId, { [HOLD_METADATA_KEY]: null })
+      // Clear the hold only if it is still the one the plugin wrote; a merchant may have replaced it.
+      if (state.hold_message !== undefined && loaded.order?.metadata?.[HOLD_METADATA_KEY] === state.hold_message) {
+        await setOrderMetadata(orderId, { [HOLD_METADATA_KEY]: null })
+        await eventBus.emit({ name: HOLD_EVENT, data: { order_id: orderId, session_id: sessionId, held: false, message: decision.message } })
+      }
       delete next.hold
-      await eventBus.emit({ name: HOLD_EVENT, data: { order_id: orderId, session_id: sessionId, held: false, message: decision.message } })
+      delete next.hold_message
       logger.info(`Zcash payment ${sessionId}: ${decision.message}`)
       break
+    }
     case "note":
     case "partial":
       logger.info(`Zcash payment ${sessionId}: ${decision.message}`)
@@ -191,11 +205,7 @@ async function apply(
     case "capture": {
       // Deliveries can be retried after a newer state was skipped (for example a receipt that was
       // later dropped). Confirm the service still sees the funds first.
-      const live = await new ServiceClient(serviceUrl).status(data.payment_id, data.address)
-      const liveZat = live ? zecToZat(String(live.total_received ?? "")) : null
-      if (liveZat === null) {
-        throw new RetryError("cannot confirm with the service, retry")
-      }
+      const liveZat = await liveTotal()
       if (liveZat < dueZat) {
         logger.info(
           `Zcash payment ${sessionId}: an event reported ${zec} ZEC, but the service now sees ${zatToZec(liveZat)} ZEC. Not captured.`
@@ -220,6 +230,14 @@ async function apply(
         throw new RetryError("could not capture payment", 500)
       }
       logger.info(`Zcash payment ${sessionId}: received ${zec} ZEC. Payment captured.`)
+      // Order cancellation runs outside this lock, so it can land between the check above and the
+      // capture. Medusa has no hook to block it, so detect it and flag the order for a refund.
+      if (loaded.order?.status === "canceled") {
+        const message = `Received ${zec} ZEC and captured it while the order was being canceled. Refund or reconcile by hand.`
+        logger.warn(`Zcash payment ${sessionId}: ${message}`)
+        next.needs_review = true
+        await setOrderMetadata(orderId, { [REVIEW_METADATA_KEY]: message })
+      }
       break
     }
   }
@@ -234,11 +252,25 @@ async function apply(
   })
   return { ok: true }
 
+  async function liveTotal(): Promise<bigint> {
+    const live = await new ServiceClient(serviceUrl).status(data!.payment_id, data!.address)
+    const liveZat = live ? zecToZat(String(live.total_received ?? "")) : null
+    if (liveZat === null) {
+      throw new RetryError("cannot confirm with the service, retry")
+    }
+    return liveZat
+  }
+
   async function hold(message: string) {
     if (state.hold === "auto") {
       return
     }
+    if (typeof loaded!.order?.metadata?.[HOLD_METADATA_KEY] === "string") {
+      // The merchant already holds this order. Leave their hold alone and don't claim it.
+      return
+    }
     next.hold = "auto"
+    next.hold_message = message
     await setOrderMetadata(orderId, { [HOLD_METADATA_KEY]: message })
     await eventBus.emit({ name: HOLD_EVENT, data: { order_id: orderId, session_id: sessionId, held: true, message } })
   }
