@@ -40,6 +40,9 @@ pub struct Config {
     pub public_base_url: Option<String>,
     /// Enables `POST /dev/simulate-payment`. Testnet only; for automated tests.
     pub dev_simulated_payments: bool,
+    /// Origins (`scheme://host[:port]`) a session's `return_url` may point to. Empty allows any
+    /// `http(s)` URL.
+    pub return_url_allowed_origins: Vec<String>,
 }
 
 impl Config {
@@ -111,6 +114,10 @@ impl Config {
                 ))
             }
         };
+        let return_url_allowed_origins = env::var("RETURN_URL_ALLOWED_ORIGINS")
+            .map(|value| parse_allowed_origins(&value))
+            .unwrap_or_else(|_| Ok(Vec::new()))
+            .map_err(AppError::InvalidConfig)?;
         let webhook_secret = env::var("ZCASH_WEBHOOK_SECRET")
             .ok()
             .map(|value| value.trim().to_string())
@@ -296,6 +303,7 @@ impl Config {
             finality_confirmations,
             public_base_url,
             dev_simulated_payments,
+            return_url_allowed_origins,
         })
     }
 }
@@ -377,6 +385,60 @@ pub fn validate_http_url(name: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Parses a comma-separated list of origins into normalized `scheme://host[:port]` strings.
+pub fn parse_allowed_origins(value: &str) -> Result<Vec<String>, String> {
+    let mut origins = Vec::new();
+    for item in value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        let item = item.trim_end_matches('/');
+        validate_http_url("RETURN_URL_ALLOWED_ORIGINS", item)?;
+        let uri = item.parse::<Uri>().map_err(|error| error.to_string())?;
+        if uri.path() != "/" && !uri.path().is_empty() || uri.query().is_some() {
+            return Err(format!(
+                "RETURN_URL_ALLOWED_ORIGINS entries must be origins without a path; got {item}"
+            ));
+        }
+        origins.push(url_origin(&uri)?);
+    }
+    Ok(origins)
+}
+
+/// The normalized origin of an absolute `http(s)` URL: lowercase scheme and host, default
+/// port removed. Rejects URLs with user info, which can disguise the real host.
+pub fn url_origin(uri: &Uri) -> Result<String, String> {
+    let authority = uri
+        .authority()
+        .ok_or_else(|| "URL must include a host".to_string())?;
+    if authority.as_str().contains('@') {
+        return Err("URL must not include user info".to_string());
+    }
+    let scheme = uri.scheme_str().unwrap_or_default().to_ascii_lowercase();
+    let host = authority.host().to_ascii_lowercase();
+    match (scheme.as_str(), authority.port_u16()) {
+        ("http", Some(80)) | ("https", Some(443)) | (_, None) => Ok(format!("{scheme}://{host}")),
+        (_, Some(port)) => Ok(format!("{scheme}://{host}:{port}")),
+    }
+}
+
+/// Checks a session's `return_url`: absolute `http(s)`, no user info, and, when `allowed` is
+/// not empty, on one of those origins.
+pub fn validate_return_url(value: &str, allowed: &[String]) -> Result<(), String> {
+    validate_http_url("return_url", value)?;
+    let uri = value
+        .parse::<Uri>()
+        .map_err(|error| format!("return_url is invalid: {error}"))?;
+    let origin = url_origin(&uri).map_err(|error| format!("return_url: {error}"))?;
+    if !allowed.is_empty() && !allowed.iter().any(|item| item == &origin) {
+        return Err(format!(
+            "return_url origin {origin} is not in RETURN_URL_ALLOWED_ORIGINS"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -392,6 +454,31 @@ mod tests {
             validate_dev_simulated_payments("testnet", Some("https://lwd.example:443")).is_err()
         );
     }
+    #[test]
+    fn return_url_allow_list() {
+        use super::{parse_allowed_origins, validate_return_url};
+        let allowed =
+            parse_allowed_origins("https://Shop.Example, http://localhost:8080/").unwrap();
+        assert_eq!(allowed, ["https://shop.example", "http://localhost:8080"]);
+        assert!(validate_return_url("https://shop.example/orders/1?key=x", &allowed).is_ok());
+        assert!(validate_return_url("https://shop.example:443/x", &allowed).is_ok());
+        assert!(validate_return_url("http://localhost:8080/x", &allowed).is_ok());
+        for bad in [
+            "https://evil.example/x",
+            "https://shop.example.evil.example/x",
+            "http://shop.example/x",
+            "https://shop.example@evil.example/x",
+            "http://localhost:8081/x",
+        ] {
+            assert!(validate_return_url(bad, &allowed).is_err(), "{bad}");
+        }
+        assert!(validate_return_url("https://any.example/x", &[]).is_ok());
+        assert!(validate_return_url("https://user@any.example/x", &[]).is_err());
+        assert!(parse_allowed_origins("https://shop.example/path").is_err());
+        assert!(parse_allowed_origins("ftp://shop.example").is_err());
+        assert!(parse_allowed_origins(" , ").unwrap().is_empty());
+    }
+
 
     #[test]
     fn public_base_url_rejects_query_and_fragment() {

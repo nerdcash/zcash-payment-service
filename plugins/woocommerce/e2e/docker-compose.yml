@@ -65,6 +65,7 @@ services:
       ZCASH_WEBHOOK_SECRET: e2e-webhook-secret
       WEBHOOK_POLL_INTERVAL_SECONDS: 1
       PUBLIC_BASE_URL: http://localhost:${E2E_SERVICE_PORT:-8787}
+      RETURN_URL_ALLOWED_ORIGINS: ${E2E_WP_URL:-http://localhost:8080}
       ZCASH_DEV_SIMULATED_PAYMENTS: "true"
     tmpfs:
       - /data

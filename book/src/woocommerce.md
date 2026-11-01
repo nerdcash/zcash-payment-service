@@ -32,7 +32,7 @@ If the service has no public pay page (no `PUBLIC_BASE_URL` and no *Pay page bas
    Also choose `WEBHOOK_REPORT_CONFIRMATIONS` before the service's first start; it is fixed once the database exists. The default `0` reports unconfirmed (mempool) payments, so the plugin marks an order paid before the transaction is mined. That is fine for low-value or digital goods where speed matters. If a dropped transaction would cost you, set `1` or more so orders are paid only from mined transactions. Either way, if funds for a paid order later disappear, the plugin puts the order **On hold** and adds a note.
 
    The `?rest_route=` form works with any permalink setting. `https://shop.example.com/wp-json/zcash-payment/v1/webhook` also works when pretty permalinks are on.
-2. Expose the pay page publicly as described in [Exposing the page](pay-page.md#exposing-the-page) and set `PUBLIC_BASE_URL`.
+2. Expose the pay page publicly as described in [Exposing the page](pay-page.md#exposing-the-page) and set `PUBLIC_BASE_URL`. Set `RETURN_URL_ALLOWED_ORIGINS` to your store's origin (for example `https://shop.example`) so the pay page only ever returns payers to your store.
 3. Copy `plugins/woocommerce/zcash-payment-gateway` into `wp-content/plugins/` (or zip the folder and upload it under **Plugins → Add New**) and activate it.
 4. Under **WooCommerce → Settings → Payments → Zcash**, set:
    - **Service URL**: where WordPress reaches the service, for example `http://zcash-payment-service:8787`. This is a private address; it does not need to be public.

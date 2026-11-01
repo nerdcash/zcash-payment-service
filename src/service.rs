@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::{AttributedScannedReceipt, ReceiptKind};
 use crate::{
-    config::{validate_http_url, Config},
+    config::{validate_return_url, Config},
     db::{
         format_zat_as_zec, AppDb, AtomicFreshAddressAllocation, OwnedAddressReceiver,
         OwnedIssuedAddress,
@@ -23,6 +23,7 @@ pub struct PaymentService {
     wallet_view: WalletView,
     public_base_url: Option<String>,
     dev_simulated_payments: bool,
+    return_url_allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,6 +132,7 @@ impl PaymentService {
             public_base_url: config.public_base_url.clone(),
             dev_simulated_payments: config.dev_simulated_payments
                 && wallet_identity.network == "testnet",
+            return_url_allowed_origins: config.return_url_allowed_origins.clone(),
         })
     }
 
@@ -150,7 +152,8 @@ impl PaymentService {
             .map(str::trim)
             .filter(|value| !value.is_empty());
         if let Some(return_url) = return_url {
-            validate_http_url("return_url", return_url).map_err(AppError::InvalidRequest)?;
+            validate_return_url(return_url, &self.return_url_allowed_origins)
+                .map_err(AppError::InvalidRequest)?;
         }
 
         tracing::info!(
@@ -540,6 +543,7 @@ mod tests {
             finality_confirmations: 100,
             public_base_url: None,
             dev_simulated_payments: false,
+            return_url_allowed_origins: Vec::new(),
         }
     }
 
@@ -827,10 +831,33 @@ mod tests {
     }
 
     #[test]
+    fn enforces_return_url_allowed_origins() {
+        let temp = tempdir().unwrap();
+        let mut restricted = config(temp.path());
+        restricted.return_url_allowed_origins = vec!["https://shop.example".into()];
+        let service = PaymentService::initialize(restricted).unwrap();
+        service
+            .issue_payment_session(session_request(None, Some("https://shop.example/o/1")))
+            .unwrap();
+        let error = service
+            .issue_payment_session(session_request(None, Some("https://evil.example/")))
+            .unwrap_err();
+        assert!(
+            matches!(error, AppError::InvalidRequest(ref text) if text.starts_with("return_url"))
+        );
+    }
+
+    #[test]
     fn rejects_return_urls_that_are_not_absolute_http() {
         let temp = tempdir().unwrap();
         let service = PaymentService::initialize(config(temp.path())).unwrap();
-        for bad in ["/thanks", "javascript:alert(1)", "ftp://example.com/x"] {
+        for bad in [
+            "/thanks",
+            "javascript:alert(1)",
+            "data:text/html,x",
+            "ftp://example.com/x",
+            "https://shop.example@evil.example/",
+        ] {
             let error = service
                 .issue_payment_session(session_request(None, Some(bad)))
                 .unwrap_err();

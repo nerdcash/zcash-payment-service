@@ -40,7 +40,16 @@ curl -s -X POST http://127.0.0.1:8787/payment-session \
 `payment_id` is 128 random bits in hex, so a link can't be guessed from another one. `pay_url`
 is absolute when `PUBLIC_BASE_URL` is set and a path such as `/pay/<payment_id>` otherwise.
 
-`return_url` must be an absolute `http` or `https` URL. Anything else is rejected with `400`.
+`return_url` must be an absolute `http` or `https` URL without user info (`user@host`). Anything
+else, such as `javascript:` or `data:`, is rejected with `400`.
+
+To limit where the pay page can send payers, set `RETURN_URL_ALLOWED_ORIGINS` to a
+comma-separated list of origins, such as `https://shop.example,https://www.shop.example`. A
+`return_url` on any other origin is rejected with `400`. When it is unset, any `http(s)` URL is
+accepted. That is safe only while `POST /payment-session` stays private (see below), since only
+your application can then choose a `return_url`. Setting it is recommended as a second line of
+defense: if the session endpoint were ever exposed by mistake, nobody could use your pay page to
+send payers to their own site.
 
 Every session gets a payment id, whether or not you use the page. The existing `address` and
 `qr_text` fields are unchanged.

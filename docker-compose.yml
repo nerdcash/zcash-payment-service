@@ -14,6 +14,7 @@ services:
       ZCASH_WEBHOOK_URL: ${ZCASH_WEBHOOK_URL:-}
       ZCASH_WEBHOOK_SECRET: ${ZCASH_WEBHOOK_SECRET:-}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      RETURN_URL_ALLOWED_ORIGINS: ${RETURN_URL_ALLOWED_ORIGINS:-}
       # Testnet-only test hook; never enable in production.
       ZCASH_DEV_SIMULATED_PAYMENTS: ${ZCASH_DEV_SIMULATED_PAYMENTS:-false}
     volumes:

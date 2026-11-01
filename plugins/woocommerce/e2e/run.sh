@@ -76,4 +76,9 @@ code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$E2E_WP_URL/?rest_route=
   -H 'content-type: application/json' -H "X-Signature: $sig" --data "$body")"
 [ "$code" = 200 ] || { echo "unknown address returned $code"; exit 1; }
 
+echo "--- the service refuses a return_url outside RETURN_URL_ALLOWED_ORIGINS"
+code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$E2E_SERVICE_URL/payment-session" \
+  -H 'content-type: application/json' --data '{"payment_source":"zcash","amount":"0.1","return_url":"https://evil.example/"}')"
+[ "$code" = 400 ] || { echo "foreign return_url returned $code"; exit 1; }
+
 echo "e2e passed"

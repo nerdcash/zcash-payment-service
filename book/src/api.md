@@ -93,7 +93,7 @@ Unknown JSON fields are ignored. A missing `payment_source`, or a value of the w
 | JSON syntax is invalid | 400 | plain text starting with `Failed to parse the request body as JSON` |
 | JSON does not match the struct | 422 | plain text starting with `Failed to deserialize the JSON body into the target type` |
 | `payment_source` is not `zcash` | 400 | `{"error":"invalid request: payment_source must be 'zcash'"}` |
-| `return_url` is not an absolute `http(s)` URL | 400 | `{"error":"invalid request: return_url must ..."}` |
+| `return_url` is not an absolute `http(s)` URL, has user info, or is not on an allowed origin | 400 | `{"error":"invalid request: return_url must ..."}` |
 | Address derivation or the database fails | 500 | `{"error":"wallet error: ..."}` or `{"error":"database error: ..."}` |
 
 Success is `200` and `PaymentSessionResponse`:
@@ -183,6 +183,7 @@ Delivery outcomes are in the [integration guide](integration.md#retries). On sta
 | `ZCASH_WEBHOOK_SECRET` | unset | HMAC key. Delivery runs only when this and the URL are both set. |
 | `PUBLIC_BASE_URL` | unset | Absolute `http(s)` URL with an optional path prefix and no query or fragment; trailing `/` removed. Prefix for `pay_url`. See [Payment links](pay-page.md#exposing-the-page). |
 | `ZCASH_DEV_SIMULATED_PAYMENTS` | `false` | `true`/`false`/`1`/`0`. Enables `POST /dev/simulate-payment`. Rejected unless `ZCASH_NETWORK=testnet` and `LIGHTWALLETD_URL` is unset (no real scanning runs alongside it). For tests only. |
+| `RETURN_URL_ALLOWED_ORIGINS` | unset | Comma-separated `http(s)` origins (no path) a session's `return_url` must match. Unset allows any `http(s)` URL. See [Payment links](pay-page.md). |
 | `WEBHOOK_POLL_INTERVAL_SECONDS` | `2` | `u64`, greater than 0. |
 | `WEBHOOK_RETRY_DELAY_SECONDS` | `30` | `u64`, greater than 0. Base of the exponential backoff. |
 | `WEBHOOK_RETRY_MAX_DELAY_SECONDS` | `300` | `u64`, greater than 0. Cap on the backoff. |
@@ -299,6 +300,6 @@ pub fn init_logging(config: &Config) -> Result<WorkerGuard, AppError>;
 
 `run` is the path `main` uses. It calls `Config::from_env`, `init_logging`, `PaymentService::initialize`, the private webhook recovery, both `spawn_*` workers, `build_router`, and `axum::serve` with shutdown on Ctrl-C.
 
-`PaymentService`'s fields are private. `Config`'s fields are public and match the environment table: `listen_addr`, `network`, `startup_uivk`, `lightwalletd_url`, `birthday_height`, `wallet_db_path`, `app_db_path`, `log_dir`, `catch_up_threshold_blocks`, `catch_up_batch_size`, `sync_poll_interval_seconds`, `webhook_url`, `webhook_secret`, `webhook_poll_interval_seconds`, `webhook_retry_delay_seconds`, `webhook_retry_max_delay_seconds`, `webhook_max_attempts`, `webhook_report_confirmations`, `finality_confirmations`, `public_base_url`.
+`PaymentService`'s fields are private. `Config`'s fields are public and match the environment table: `listen_addr`, `network`, `startup_uivk`, `lightwalletd_url`, `birthday_height`, `wallet_db_path`, `app_db_path`, `log_dir`, `catch_up_threshold_blocks`, `catch_up_batch_size`, `sync_poll_interval_seconds`, `webhook_url`, `webhook_secret`, `webhook_poll_interval_seconds`, `webhook_retry_delay_seconds`, `webhook_retry_max_delay_seconds`, `webhook_max_attempts`, `webhook_report_confirmations`, `finality_confirmations`, `public_base_url`, `return_url_allowed_origins`.
 
 `db`, `scanner`, `receipt_ingest`, `wallet_db`, and `zcash` are public as well. They are the storage and scan implementation behind the HTTP routes. Their types and function signatures are the `pub` items in those files. This guide does not add behavior on top of them.
