@@ -7,7 +7,7 @@
  * Requires at least: 6.4
  * Requires PHP:      8.1
  * Requires Plugins:  woocommerce
- * WC requires at least: 8.0
+ * WC requires at least: 8.2
  * Author:            nerdcash
  * License:           MIT
  * License URI:       https://opensource.org/licenses/MIT
@@ -54,6 +54,16 @@ add_action(
 	'plugins_loaded',
 	static function () {
 		if ( ! class_exists( 'WC_Payment_Gateway' ) ) {
+			return;
+		}
+		// The webhook finds orders by meta query, which WooCommerce's order tables support from 8.2.
+		if ( defined( 'WC_VERSION' ) && version_compare( WC_VERSION, '8.2', '<' ) ) {
+			add_action(
+				'admin_notices',
+				static function () {
+					echo '<div class="notice notice-error"><p>' . esc_html__( 'Zcash Payment Gateway needs WooCommerce 8.2 or newer and is inactive.', 'zcash-payment-gateway' ) . '</p></div>';
+				}
+			);
 			return;
 		}
 		require_once ZCASH_PG_DIR . 'includes/class-zcash-pg-gateway.php';

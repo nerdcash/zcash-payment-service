@@ -25,6 +25,8 @@ If the service has no public pay page (no `PUBLIC_BASE_URL` and no *Pay page bas
 
 ## Setup
 
+Requires WordPress 6.4+, PHP 8.1+, and WooCommerce 8.2+ (the plugin stays inactive on older WooCommerce).
+
 1. Run the service as in [Deployment](deployment.md), with `ZCASH_WEBHOOK_URL` set to your store's webhook route and a random `ZCASH_WEBHOOK_SECRET`:
 
    ```text

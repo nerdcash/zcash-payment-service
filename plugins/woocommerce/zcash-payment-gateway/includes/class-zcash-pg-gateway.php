@@ -185,6 +185,13 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 			return $this->fail( __( 'Zcash payments are temporarily unavailable. Please try again.', 'zcash-payment-gateway' ) );
 		}
 
+		// The request took time and the lock only covers this plugin: re-read, and give up if
+		// the order was closed or repriced meanwhile. The new address stays unused.
+		$order = wc_get_order( $order->get_id() );
+		if ( ! $order || $order->is_paid() || $order->has_status( array( 'cancelled', 'failed', 'refunded' ) )
+			|| $order->get_total() . ' ' . $order->get_currency() !== $priced ) {
+			return $this->fail( __( 'This order changed while payment was starting. Please try again or contact the store.', 'zcash-payment-gateway' ) );
+		}
 		$order->update_meta_data( self::META_ADDRESS, (string) $session['address'] );
 		$order->update_meta_data( self::META_QR_TEXT, (string) $session['qr_text'] );
 		$order->update_meta_data( self::META_AMOUNT_ZAT, (string) $amount_zat );
@@ -247,7 +254,12 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 		$received = (int) $order->get_meta( self::META_RECEIVED_ZAT );
 		// The service's view is newer than ours while a webhook is queued or retrying.
 		$live = $this->service_status( $order );
-		if ( null !== $live ) {
+		if ( null === $live ) {
+			// Our own total may be stale; don't risk asking for money already sent.
+			echo '<p>' . esc_html__( 'The payment status can\'t be checked right now. Refresh in a moment before sending anything.', 'zcash-payment-gateway' ) . '</p></section>';
+			return;
+		}
+		{
 			if ( in_array( $live['status'] ?? '', array( 'paid', 'received' ), true ) ) {
 				echo '<p>' . esc_html__( 'Payment seen. Waiting for confirmation; refresh in a moment.', 'zcash-payment-gateway' ) . '</p></section>';
 				return;

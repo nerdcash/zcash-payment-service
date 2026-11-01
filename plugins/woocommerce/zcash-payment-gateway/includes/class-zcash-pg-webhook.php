@@ -12,6 +12,17 @@ final class Zcash_PG_Webhook {
 	public static function register(): void {
 		// A refund or cancellation of an order that holds Zcash funds sets those funds aside, so
 		// reopening the order later can't reuse them automatically.
+		// Refunds, partial ones included, leave funds the order may no longer be owed.
+		add_action(
+			'woocommerce_order_refunded',
+			static function ( $order_id ) {
+				$order = wc_get_order( $order_id );
+				if ( $order && $order->get_meta( Zcash_PG_Gateway::META_ADDRESS ) ) {
+					$order->update_meta_data( Zcash_PG_Gateway::META_NEEDS_REVIEW, '1' );
+					$order->save();
+				}
+			}
+		);
 		add_action(
 			'woocommerce_order_status_changed',
 			static function ( $order_id, $from, $to, $order ) {
@@ -185,7 +196,12 @@ final class Zcash_PG_Webhook {
 			}
 			// The status request took time: re-read so a cancellation made meanwhile wins.
 			$order = wc_get_order( $order->get_id() );
-			if ( ! $order || $order->is_paid() || ! $order->has_status( array( 'pending', 'on-hold' ) ) ) {
+			if ( ! $order || $order->is_paid() || ! $order->has_status( array( 'pending', 'on-hold' ) )
+				|| Zcash_PG_Gateway::ID !== $order->get_payment_method()
+				|| $order->get_meta( Zcash_PG_Gateway::META_NEEDS_REVIEW )
+				|| (string) $order->get_meta( Zcash_PG_Gateway::META_PRICED ) !== $order->get_total() . ' ' . $order->get_currency()
+				|| ( $order->has_status( 'on-hold' ) && ! $order->get_meta( Zcash_PG_Gateway::META_AUTO_HOLD ) ) ) {
+				// Something changed during the status request. The retry re-evaluates from scratch.
 				return new WP_REST_Response( array( 'error' => 'order changed, retry' ), 503 );
 			}
 			$order->update_meta_data( Zcash_PG_Gateway::META_RECEIVED_ZAT, (string) $total );
