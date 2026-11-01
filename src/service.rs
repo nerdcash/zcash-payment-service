@@ -545,9 +545,18 @@ mod tests {
 
     #[test]
     fn remaining_amount_subtracts_partial_payments() {
-        assert_eq!(super::remaining_amount(Some("0.5"), 0).as_deref(), Some("0.5"));
-        assert_eq!(super::remaining_amount(Some("0.5"), 20_000_000).as_deref(), Some("0.30000000"));
-        assert_eq!(super::remaining_amount(Some("0.5"), 50_000_000).as_deref(), Some("0.5"));
+        assert_eq!(
+            super::remaining_amount(Some("0.5"), 0).as_deref(),
+            Some("0.5")
+        );
+        assert_eq!(
+            super::remaining_amount(Some("0.5"), 20_000_000).as_deref(),
+            Some("0.30000000")
+        );
+        assert_eq!(
+            super::remaining_amount(Some("0.5"), 50_000_000).as_deref(),
+            Some("0.5")
+        );
         assert_eq!(super::remaining_amount(None, 1), None);
     }
 

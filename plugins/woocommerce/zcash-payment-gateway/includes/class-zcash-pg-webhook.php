@@ -100,6 +100,7 @@ final class Zcash_PG_Webhook {
 		if ( null !== $review_note ) {
 			wc_get_logger()->warning( 'Order ' . $order->get_id() . ': ' . $review_note, array( 'source' => Zcash_PG_Gateway::ID ) );
 			$order->add_order_note( $review_note );
+			$order->update_meta_data( Zcash_PG_Gateway::META_NEEDS_REVIEW, '1' );
 		} elseif ( $order->is_paid() ) {
 			if ( $due > 0 && $total < $due ) {
 				// A receipt was dropped (expired from the mempool or undone by a reorg).
