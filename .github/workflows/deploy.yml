@@ -1,0 +1,30 @@
+name: Deployment
+
+on:
+  # Called from checks.yml, which owns the triggers and the required gate.
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  compose:
+    name: Compose with Caddy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # Test the service from this checkout, not the last published image.
+      - name: Build the service image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: ghcr.io/nerdcash/zcash-payment-service:ci
+          cache-from: type=gha,scope=deploy-test
+          cache-to: type=gha,mode=max,scope=deploy-test
+      - name: Bring up deploy/compose.yml and check what is public
+        run: |
+          echo IMAGE_TAG=ci > "$RUNNER_TEMP/ci.env"
+          EXTRA_ENV_FILE="$RUNNER_TEMP/ci.env" deploy/test/test.sh

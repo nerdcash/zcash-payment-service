@@ -1,0 +1,35 @@
+# Serves the pay page on PAY_DOMAIN with automatic HTTPS. Everything except the public routes
+# answers 404, so nobody on the internet can create payment sessions.
+{
+	http_port {$CADDY_HTTP_PORT:80}
+	https_port {$CADDY_HTTPS_PORT:443}
+	# Optional: an address for certificate expiry warnings.
+	# email you@example.com
+}
+
+# TLS_MODE=acme (the default) gets a real certificate from Let's Encrypt or ZeroSSL; the domain's
+# DNS must point at this machine and ports 80 and 443 must be open. TLS_MODE=internal uses Caddy's
+# own local CA instead, for testing without a domain.
+(tls_acme) {
+}
+(tls_internal) {
+	tls internal
+}
+
+{$PAY_DOMAIN} {
+	import tls_{$TLS_MODE:acme}
+
+	@public path /pay/* /payments/*
+	handle @public {
+		reverse_proxy {$SERVICE_UPSTREAM:zcash-payment-service:8787}
+	}
+	handle {
+		respond 404
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	encode zstd gzip
+}
