@@ -82,7 +82,15 @@ final class Zcash_PG_Webhook {
 
 		$priced_now  = $order->get_total() . ' ' . $order->get_currency();
 		$review_note = null;
-		if ( Zcash_PG_Gateway::ID !== $order->get_payment_method() ) {
+		if ( $order->get_meta( Zcash_PG_Gateway::META_NEEDS_REVIEW ) ) {
+			// Once funds are set aside for review, keep later receipts there too until the
+			// merchant clears the flag, so reconciled or refunded funds never complete the order.
+			$review_note = sprintf(
+				/* translators: %s: received ZEC */
+				__( 'Zcash total for this order is now %s ZEC. A payment for this order is under manual review, so this was not applied automatically.', 'zcash-payment-gateway' ),
+				$zec
+			);
+		} elseif ( Zcash_PG_Gateway::ID !== $order->get_payment_method() ) {
 			// The payer switched to another gateway; this Zcash session is abandoned.
 			$review_note = sprintf(
 				/* translators: %s: received ZEC */
