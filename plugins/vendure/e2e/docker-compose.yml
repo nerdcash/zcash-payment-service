@@ -1,0 +1,64 @@
+# End-to-end test stack: Vendure (with this plugin) + Postgres + this service on testnet with
+# simulated payments. Needs no store, wallet, or chain accounts. See run.sh and book/src/vendure.md.
+name: zcash-vendure-e2e
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: vendure
+      POSTGRES_PASSWORD: vendure
+      POSTGRES_DB: vendure
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "vendure"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  vendure:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${E2E_VENDURE_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgres://vendure:vendure@db:5432/vendure
+      STORE_URL: ${E2E_STORE_URL:-http://localhost:3000}
+      ZCASH_SERVICE_URL: http://zcash-payment-service:8787
+      ZCASH_WEBHOOK_SECRET: e2e-webhook-secret
+      NODE_ENV: production
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+
+  zcash-payment-service:
+    build: ../../..
+    ports:
+      - "127.0.0.1:${E2E_SERVICE_PORT:-8787}:8787"
+    environment:
+      PORT: 8787
+      APP_DATA_DIR: /data
+      ZCASH_NETWORK: testnet
+      # Incoming viewing key derived from the repository's public test key. It holds no funds.
+      ZCASH_UIVK: uivktest1ayc2s599yatrj5kgp2fr4sn0xa2enkykd858d5p7rfwq8u3u65zf3dgzdar2jqzm6nzck5laqdhhfuj849hv8t3gzkgqmecvq49420024aucsy73rxsa9222n8uczqmgus06nx80mjf5kl3tq4qnc3tjj3muhdxhmnavdfqaa8vjk7aqq03ll5sfntag00f4av72q89xwfkw3g26ez3mge8k0xt3kzs5hgzj5sz9fkqdgu4mphd
+      ZCASH_BIRTHDAY_HEIGHT: 3000000
+      ZCASH_WEBHOOK_URL: http://vendure:3000/zcash-payments/webhook
+      ZCASH_WEBHOOK_SECRET: e2e-webhook-secret
+      WEBHOOK_POLL_INTERVAL_SECONDS: 1
+      WEBHOOK_RETRY_DELAY_SECONDS: 2
+      PUBLIC_BASE_URL: http://localhost:${E2E_SERVICE_PORT:-8787}
+      RETURN_URL_ALLOWED_ORIGINS: ${E2E_STORE_URL:-http://localhost:3000}
+      ZCASH_DEV_SIMULATED_PAYMENTS: "true"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8787/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40

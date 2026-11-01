@@ -1,0 +1,36 @@
+{
+  "name": "@nerdcash/vendure-payment-zcash",
+  "version": "0.1.0",
+  "description": "Zcash payments for Vendure through a self-hosted zcash-payment-service",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nerdcash/zcash-payment-service.git",
+    "directory": "plugins/vendure"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@vendure/core": "^3.0.0",
+    "@vendure/common": "^3.0.0",
+    "@nestjs/common": ">=10",
+    "express": ">=4.18"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.19.2",
+    "@vendure/core": "^3.8.1",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}

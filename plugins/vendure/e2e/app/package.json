@@ -1,0 +1,16 @@
+{
+  "name": "zcash-vendure-e2e-app",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@vendure/admin-ui-plugin": "3.8.1",
+    "@vendure/core": "3.8.1",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "5.9.3"
+  }
+}

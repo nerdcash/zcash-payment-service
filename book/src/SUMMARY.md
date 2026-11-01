@@ -8,6 +8,7 @@
   - [Payment links and the pay page](pay-page.md)
   - [WooCommerce plugin](woocommerce.md)
   - [Medusa plugin](medusa.md)
+  - [Vendure plugin](vendure.md)
 - [API reference](api.md)
 - [Deployment](deployment.md)
 - [Comparison with other processors](comparison.md)
