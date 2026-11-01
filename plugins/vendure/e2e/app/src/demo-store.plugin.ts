@@ -30,8 +30,8 @@ async function checkout(event) {
     must((await gql("mutation($id: [ID!]!) { setOrderShippingMethod(shippingMethodId: $id) { ... on Order { id } ... on ErrorResult { errorCode message } } }", { id: [eligibleShippingMethods[0].id] })).setOrderShippingMethod);
     must((await gql("mutation { transitionOrderToState(state: \"ArrangingPayment\") { ... on Order { id } ... on OrderStateTransitionError { errorCode message transitionError } } }")).transitionOrderToState);
     // The Zcash payment is Authorized at once, so this places the order. The webhook settles it.
-    const order = must((await gql("mutation { addPaymentToOrder(input: { method: \"zcash\", metadata: {} }) { ... on Order { code payments { method metadata } } ... on ErrorResult { errorCode message } } }")).addPaymentToOrder);
-    const payment = order.payments.find((p) => p.method === "zcash");
+    const order = must((await gql("mutation { addPaymentToOrder(input: { method: \"zcash-testnet\", metadata: {} }) { ... on Order { code payments { method metadata } } ... on ErrorResult { errorCode message } } }")).addPaymentToOrder);
+    const payment = order.payments.find((p) => p.method === "zcash-testnet");
     location.href = (payment.metadata.public ?? payment.metadata).pay_url || ("/demo-store/order?code=" + order.code);
   } catch (e) { status.textContent = "Error: " + e.message; }
 }

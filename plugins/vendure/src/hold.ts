@@ -1,20 +1,29 @@
 import { FulfillmentHandler, FulfillmentProcess, ID, Injector, OrderProcess, Payment, RequestContext, TransactionalConnection } from "@vendure/core"
 import { SHIPPING_ORDER_STATES } from "./constants"
 import { readState } from "./lib/decide"
-import { HANDLER_CODE } from "./lib/options"
+import { isZcashPayment, rowLock } from "./payments"
 
 let connection: TransactionalConnection | undefined
 
-/** The hold message, if any Zcash payment on the order is held by the plugin. */
-export async function heldMessage(ctx: RequestContext, orderId: ID): Promise<string | null> {
+/**
+ * The hold message, if any Zcash payment on the order is held by the plugin. With `lock`, the
+ * order's payment rows stay locked until the caller's transaction ends, so the webhook can't place
+ * a hold in the meantime.
+ */
+export async function heldMessage(ctx: RequestContext, orderId: ID, lock = false): Promise<string | null> {
   if (!connection) {
     return null
   }
-  const payments = await connection
+  const query = connection
     .getRepository(ctx, Payment)
-    .find({ where: { order: { id: orderId }, method: HANDLER_CODE } })
-  for (const p of payments) {
-    if (readState(p.metadata).hold === "auto") {
+    .createQueryBuilder("payment")
+    .where("payment.orderId = :orderId", { orderId })
+  const mode = lock ? rowLock(connection) : undefined
+  if (mode) {
+    query.setLock(mode.mode)
+  }
+  for (const p of await query.getMany()) {
+    if (isZcashPayment(p) && readState(p.metadata).hold === "auto") {
       return "This order's Zcash funds dropped after payment and it is on hold. Do not fulfill it until the hold is released."
     }
   }
@@ -55,7 +64,8 @@ const guarded = new WeakSet<FulfillmentHandler>()
 /**
  * Makes every fulfillment handler refuse a held order before it creates anything. Vendure saves a
  * new fulfillment before its first state transition, so the process guard alone would leave a
- * stranded "Created" fulfillment holding the order's lines.
+ * stranded "Created" fulfillment holding the order's lines. The check locks the order's payment
+ * rows for the rest of the fulfillment mutation, so a hold can't land between it and the save.
  */
 export function guardFulfillmentHandlers(handlers: FulfillmentHandler[]) {
   for (const handler of handlers) {
@@ -66,7 +76,7 @@ export function guardFulfillmentHandlers(handlers: FulfillmentHandler[]) {
     const create = handler.createFulfillment.bind(handler)
     handler.createFulfillment = async (ctx, orders, lines, args) => {
       for (const order of orders) {
-        const message = await heldMessage(ctx, order.id)
+        const message = await heldMessage(ctx, order.id, true)
         if (message) {
           throw new Error(message)
         }

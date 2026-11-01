@@ -9,15 +9,15 @@
 3. The service sends a signed webhook to `/zcash-payments/webhook` each time the address's total changes. The plugin checks the `X-Signature` HMAC, finds the payment by its address, ignores stale events, and confirms the total with `GET /payments/{id}`. Once the total covers the payment, it settles it, and the order moves to `PaymentSettled`. A partial payment is recorded in the order history but settles nothing.
 4. The pay page sends the customer back to your storefront.
 
-Settling a Zcash payment by hand in the admin runs the same live check, so it is refused until the service reports enough received.
+Settling a Zcash payment by hand in the admin runs the same live check, so it is refused until the service reports enough received. It is also refused for a cancelled order or a payment flagged for review. A refusal leaves the payment's state alone, so it can still settle later.
 
 Edge cases the plugin handles:
 
 - **Funds drop after settlement** (an unconfirmed transaction expires, or a reorg): the plugin puts the order on hold. It adds a private history note and publishes a `ZcashPaymentHoldEvent`. While held, fulfillments can't be created, shipped, or delivered, and the order can't move to a shipped or delivered state. When the funds return and the service confirms the full total, the hold is released. **Releasing a hold never settles again or re-runs order placement or fulfillment.**
 - **A payment's amount is fixed once its address is issued.** If the order changes, add a new payment; the old address is not reused or re-priced.
 - **Payment for a cancelled order** is never settled. The plugin adds a history note and publishes a `ZcashPaymentReviewEvent` so you can refund it. If a cancellation lands while a settlement is in flight, the order is flagged the same way.
-- **Stale or replayed events** are ignored by their event version. Overlapping deliveries for one payment are serialized with a row lock, and the version is stored only after the update succeeds, so a failed update is retried.
-- **State is kept in the payment's metadata**, which storefronts can't write, and amounts are converted with exact integer math.
+- **Stale or replayed events** are ignored by their event version. Overlapping deliveries for one payment are serialized with a row lock (on SQLite, by its one-writer-at-a-time transactions). The version is stored only after the update succeeds, so a failed update is retried. A new fulfillment takes the same lock, so a hold can't land between the hold check and the fulfillment being saved.
+- **State is kept in the payment's metadata**, which storefronts can't write, and amounts are converted with exact integer math. The metadata also marks the payments the plugin issued, so the payment method can have any code.
 
 ## Setup
 

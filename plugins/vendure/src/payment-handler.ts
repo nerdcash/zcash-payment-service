@@ -1,11 +1,15 @@
-import { ConfigService, Injector, LanguageCode, Logger, PaymentMethodHandler } from "@vendure/core"
+import { ConfigService, Injector, LanguageCode, Logger, PaymentMethodHandler, type PaymentState } from "@vendure/core"
 import { loggerCtx, pluginOptions } from "./constants"
+import { readState } from "./lib/decide"
 import { HANDLER_CODE, rateFor } from "./lib/options"
 import { ServiceClient } from "./lib/service-client"
+import { isZcashPayment } from "./payments"
 import { amountToZat, minorUnitsToString, resolvePayUrl, zatToZec, zecToZat } from "./lib/zcash"
 
 /** What the handler stores in a Zcash payment's metadata. `public` is visible to the Shop API. */
 export interface ZcashPaymentMetadata {
+  /** Marks the payment as issued by this plugin, whatever the payment method's code. */
+  handler: typeof HANDLER_CODE
   address: string
   payment_id: string
   amount_zat: string
@@ -73,6 +77,7 @@ export const zcashPaymentHandler = new PaymentMethodHandler({
       return { amount, state: "Declined", errorMessage: "Zcash payments are temporarily unavailable. Please try again." }
     }
     const data: ZcashPaymentMetadata = {
+      handler: HANDLER_CODE,
       address: session.address,
       payment_id: session.payment_id,
       amount_zat: zat.toString(),
@@ -91,23 +96,29 @@ export const zcashPaymentHandler = new PaymentMethodHandler({
    * Settles only when the service sees the full amount, whether the webhook or an administrator
    * asks, so nobody can mark an unpaid order paid by mistake.
    */
-  async settlePayment(_ctx, _order, payment) {
+  async settlePayment(_ctx, order, payment) {
+    // Every refusal keeps the payment's state, so a later settlement can still succeed.
+    const refuse = (errorMessage: string) => ({
+      success: false as const,
+      state: payment.state as Exclude<PaymentState, "Settled">,
+      errorMessage,
+    })
     const options = pluginOptions.current
     const data = payment.metadata as Partial<ZcashPaymentMetadata>
-    if (!options || typeof data?.payment_id !== "string" || typeof data.address !== "string") {
-      return { success: false, errorMessage: "Not a Zcash payment this plugin issued." }
+    if (!options || !isZcashPayment(payment) || typeof data.payment_id !== "string" || typeof data.address !== "string") {
+      return refuse("Not a Zcash payment this plugin issued.")
+    }
+    if (order.state === "Cancelled" || readState(payment.metadata).needs_review) {
+      return refuse("This Zcash payment is flagged for review. Refund or reconcile it by hand.")
     }
     const live = await new ServiceClient(options.serviceUrl).status(data.payment_id, data.address)
     const received = live ? zecToZat(String(live.total_received ?? "")) : null
     if (received === null) {
-      return { success: false, errorMessage: "Cannot reach zcash-payment-service to confirm the payment." }
+      return refuse("Cannot reach zcash-payment-service to confirm the payment.")
     }
     const due = BigInt(String(data.amount_zat ?? "0"))
     if (due <= 0n || received < due) {
-      return {
-        success: false,
-        errorMessage: `Received ${zatToZec(received)} of ${zatToZec(due)} ZEC so far.`,
-      }
+      return refuse(`Received ${zatToZec(received)} of ${zatToZec(due)} ZEC so far.`)
     }
     return { success: true }
   },

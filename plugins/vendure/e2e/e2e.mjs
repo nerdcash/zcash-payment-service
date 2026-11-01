@@ -216,6 +216,8 @@ try {
     { id: lateOrder.payments[0].id }
   );
   assert.equal(settle.settlePayment.__typename, 'SettlePaymentError', JSON.stringify(settle));
+  lateOrder = await getOrder(lateOrder.id);
+  assert.equal(lateOrder.payments[0].state, 'Authorized', 'a refused settlement changed the payment state');
 
   console.log('--- a late payment after cancellation is flagged for refund, not settled');
   const cancel = await admin(
@@ -230,6 +232,12 @@ try {
   });
   assert.equal(lateOrder.state, 'Cancelled');
   assert.equal(settled(lateOrder), 0);
+  const settleFlagged = await admin(
+    'mutation($id: ID!) { settlePayment(id: $id) { __typename ... on ErrorResult { message } ... on SettlePaymentError { paymentErrorMessage } } }',
+    { id: lateOrder.payments[0].id }
+  );
+  assert.notEqual(settleFlagged.settlePayment.__typename, 'Payment', JSON.stringify(settleFlagged));
+  assert.equal(settled(await getOrder(lateOrder.id)), 0);
 
   console.log('--- webhook rejects a bad signature');
   const body = observation(address, 200, '9');

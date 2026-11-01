@@ -15,7 +15,8 @@ import { HistoryEntryType } from "@vendure/common/lib/generated-types"
 import { loggerCtx, PLUGIN_OPTIONS } from "./constants"
 import { ZcashPaymentHoldEvent, ZcashPaymentReviewEvent } from "./events"
 import { decide, readState, type ZcashState } from "./lib/decide"
-import { HANDLER_CODE, type ZcashPluginOptions } from "./lib/options"
+import { type ZcashPluginOptions } from "./lib/options"
+import { isZcashPayment, rowLock } from "./payments"
 import { ServiceClient } from "./lib/service-client"
 import { parseObservation, verifySignature, zatToZec, zecToZat, type Observation } from "./lib/zcash"
 
@@ -54,10 +55,11 @@ export class ZcashWebhookService {
 
     // Find the payment and its channel first, outside any transaction.
     const bootstrap = await this.requestContextService.create({ apiType: "admin" })
-    const found = await this.connection.getRepository(bootstrap, Payment).findOne({
-      where: { method: HANDLER_CODE, transactionId: observation.address },
+    const candidates = await this.connection.getRepository(bootstrap, Payment).find({
+      where: { transactionId: observation.address },
       relations: ["order", "order.channels"],
     })
+    const found = candidates.find(isZcashPayment)
     if (!found?.order) {
       // Not ours. Acknowledge so the service stops retrying, but leave a trace for reconciliation.
       Logger.warn(
@@ -87,7 +89,7 @@ export class ZcashWebhookService {
   private async apply(ctx: RequestContext, paymentId: Payment["id"], observation: Observation) {
     const payments = this.connection.getRepository(ctx, Payment)
     // Lock the payment row so overlapping deliveries apply one at a time.
-    const locked = await payments.findOne({ where: { id: paymentId }, lock: { mode: "pessimistic_write" } })
+    const locked = await payments.findOne({ where: { id: paymentId }, lock: rowLock(this.connection) })
     if (!locked) {
       return { ok: true, ignored: "unknown address" }
     }
