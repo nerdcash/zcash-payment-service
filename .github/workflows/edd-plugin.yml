@@ -1,0 +1,53 @@
+name: Easy Digital Downloads plugin
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  php:
+    name: PHP lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Lint
+        run: find plugins/easy-digital-downloads -name '*.php' -not -path '*/node_modules/*' -print0 | xargs -0 -n1 php -l
+      - name: Unit tests
+        run: php plugins/easy-digital-downloads/tests/unit.php
+
+  e2e:
+    name: End-to-end checkout
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - name: Install Playwright
+        working-directory: plugins/easy-digital-downloads/e2e
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: Run e2e
+        working-directory: plugins/easy-digital-downloads/e2e
+        env:
+          E2E_SCREENSHOT_DIR: ${{ runner.temp }}/screenshots
+        run: |
+          mkdir -p "$E2E_SCREENSHOT_DIR"
+          ./run.sh
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: edd-e2e-screenshots
+          path: |
+            ${{ runner.temp }}/screenshots
+            plugins/easy-digital-downloads/e2e/failure.png
+          if-no-files-found: ignore
