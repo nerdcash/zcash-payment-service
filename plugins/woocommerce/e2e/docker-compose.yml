@@ -4,7 +4,7 @@ name: zcash-woocommerce-e2e
 
 services:
   db:
-    image: mysql:8.4
+    image: mysql:8.4@sha256:a0225d1ea6631c8bc2385dc4c2faba17bbf1834ecf369e1659a9a382bd8d5dd7
     environment:
       MYSQL_DATABASE: wordpress
       MYSQL_USER: wordpress
@@ -17,7 +17,7 @@ services:
       retries: 40
 
   wordpress:
-    image: wordpress:php8.3-apache
+    image: wordpress:php8.3-apache@sha256:848b03bb7b4b160e3a670454e8e928e309c9aaeb1c2584e917f42ab5197662e2
     depends_on:
       db:
         condition: service_healthy
@@ -38,7 +38,7 @@ services:
       retries: 40
 
   wpcli:
-    image: wordpress:cli-php8.3
+    image: wordpress:cli-php8.3@sha256:6bcc7bb91f5157c4b915e74ee131873e99c1c1ff48f602e4a6f6cd17827305cb
     profiles: ["tools"]
     user: "33:33"
     environment:
