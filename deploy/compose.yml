@@ -1,6 +1,6 @@
 # Production deployment: the service behind Caddy, which gets and renews HTTPS certificates on its
 # own. Only the pay page and its status route are public; the rest of the API is not.
-# Copy .env.example to .env, fill it in, then `docker compose up -d`. See book/src/vps.md.
+# Copy .env.example to .env, fill it in, then `docker compose up -d`. See https://nerdcash.github.io/zcash-payment-service/vps.html.
 name: zcash-payment
 
 services:
@@ -63,7 +63,7 @@ services:
       start_period: 10s
 
 volumes:
-  # The wallet database: back it up (see book/src/vps.md).
+  # The wallet database: back it up (see https://nerdcash.github.io/zcash-payment-service/vps.html).
   service-data:
   # Caddy's certificates and ACME account.
   caddy-data:
