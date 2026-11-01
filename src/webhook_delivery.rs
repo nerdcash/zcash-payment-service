@@ -27,8 +27,8 @@ pub fn spawn_webhook_delivery_worker(config: Config) {
 }
 
 async fn delivery_loop(config: Config) -> Result<(), AppError> {
-    let app_db = AppDb::open(&config.app_db_path)?;
     let client = reqwest::Client::builder().build()?;
+    let app_db = open_app_db_with_retry(&config).await;
 
     loop {
         match deliver_ready_once(&app_db, &client, &config).await {
@@ -45,6 +45,23 @@ async fn delivery_loop(config: Config) -> Result<(), AppError> {
                     config.webhook_poll_interval_seconds,
                 ))
                 .await;
+            }
+        }
+    }
+}
+
+/// Opens the app database, retrying while it is briefly locked by other startup work (for example
+/// the wallet runtime initializing the schema). A failure here used to stop webhook delivery for
+/// the life of the process.
+async fn open_app_db_with_retry(config: &Config) -> AppDb {
+    let mut delay = std::time::Duration::from_millis(250);
+    loop {
+        match AppDb::open(&config.app_db_path) {
+            Ok(db) => return db,
+            Err(error) => {
+                tracing::warn!(error = %error, retry_in_ms = delay.as_millis() as u64, "webhook delivery worker could not open the app database; retrying");
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(30));
             }
         }
     }
