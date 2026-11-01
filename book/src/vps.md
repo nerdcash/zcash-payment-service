@@ -79,7 +79,7 @@ Edit `.env`. Every setting is described in the file; the ones you must fill in a
 - `LIGHTWALLETD_URL`: a lightwalletd server for the network.
 - `ZCASH_WEBHOOK_URL` and `ZCASH_WEBHOOK_SECRET`: your store's webhook route (see the plugin pages) and a secret from `openssl rand -hex 32`.
 - `RETURN_URL_ALLOWED_ORIGINS`: your store's origin.
-- `IMAGE_TAG`: a version tag, so upgrades happen only when you choose (see [Upgrades](#upgrades)).
+- `IMAGE_TAG`: a version tag (`.env.example` starts at the current release, `0.1.0`), so upgrades happen only when you choose (see [Upgrades](#upgrades)).
 
 To get a notice from Let's Encrypt before a certificate problem, uncomment the `email` line in `Caddyfile`.
 
@@ -152,7 +152,7 @@ On a new server, set up the server and `.env` as above first.
 
 ## Upgrades
 
-Pin `IMAGE_TAG` in `.env` to a release, such as `0.2.0` (a release tag `v0.2.0` publishes images tagged `0.2.0` and `v0.2.0`; `0.2` follows that minor series' newest patch). `main` follows every change on the main branch and is meant for testing, not production. Upgrade on purpose:
+Pin `IMAGE_TAG` in `.env` to a release, such as `0.1.0` (a release tag `v0.1.0` publishes images tagged `0.1.0` and `v0.1.0`; `0.1` follows that minor series' newest patch). `main` follows every change on the main branch and is meant for testing, not production. Upgrade on purpose:
 
 1. Read the release notes for the new version.
 2. Take a backup (above).

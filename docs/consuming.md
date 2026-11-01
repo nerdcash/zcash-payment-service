@@ -130,7 +130,7 @@ Your webhook handler should:
 ```yaml
 services:
   zcash-payment-service:
-    image: ghcr.io/nerdcash/zcash-payment-service:main
+    image: ghcr.io/nerdcash/zcash-payment-service:0.1.0
     environment:
       ZCASH_NETWORK: mainnet
       ZCASH_UIVK: ${ZCASH_UIVK}
