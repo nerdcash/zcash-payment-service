@@ -145,6 +145,9 @@ h1 {{ font-size: 1.25rem; margin: 0 0 .5rem; }}
   }};
   const statusEl = document.getElementById("status");
   const totalEl = document.getElementById("total");
+  const settled = (s) => s === "paid" || s === "received";
+  // Whether the page currently lacks payment controls (rendered settled, or removed below).
+  let controlsRemoved = settled(data.status);
   const done = (s) => (s === "paid" || s === "received") && !!data.returnUrl;
   const show = (s, total) => {{
     statusEl.dataset.status = s;
@@ -152,6 +155,7 @@ h1 {{ font-size: 1.25rem; margin: 0 0 .5rem; }}
     totalEl.textContent = total && Number(total) > 0 ? "Received so far: " + total + " ZEC" : "";
     if (s === "paid" || s === "received") {{
       document.querySelectorAll(".qr, a.button").forEach((el) => el.remove());
+      controlsRemoved = true;
     }}
   }};
   // Stop polling only when leaving for the return URL. Otherwise keep the shown state current,
@@ -167,9 +171,11 @@ h1 {{ font-size: 1.25rem; margin: 0 0 .5rem; }}
         const body = await response.json();
         show(body.status, body.total_received);
         if (done(body.status)) {{ finish(); return; }}
-        // The request changes after a partial payment (it asks only for the rest). Reload so
-        // the QR code and wallet link never ask for more than is still owed.
-        if (body.status === "partially_paid" && body.qr_text && body.qr_text !== data.qrText) {{ window.location.reload(); return; }}
+        // The request changes after a partial payment (it asks only for the rest), and a revoked
+        // receipt can raise it again or bring back a request the page already removed. Reload
+        // whenever there is still something to pay and the shown request is stale or missing.
+        const unpaid = body.status === "partially_paid" || body.status === "awaiting_payment";
+        if (unpaid && body.qr_text && (body.qr_text !== data.qrText || controlsRemoved)) {{ window.location.reload(); return; }}
       }}
     }} catch (e) {{ /* keep polling */ }}
     setTimeout(poll, 3000);
@@ -288,6 +294,19 @@ mod tests {
         .unwrap();
         assert!(!html.contains("Open in wallet"));
         assert!(!html.contains("<svg"));
+    }
+
+    #[test]
+    fn page_reloads_for_a_revoked_payment() {
+        let html = super::render_pay_page(&status_with(
+            crate::service::PaymentStatus::Paid,
+            "0.50000000",
+        ))
+        .unwrap();
+        // Polling reloads for either unpaid status when the request changed or the controls are
+        // gone, so a revoked receipt brings back a correct request.
+        assert!(html.contains(r#"body.status === "awaiting_payment""#));
+        assert!(html.contains("controlsRemoved"));
     }
 
     #[test]
