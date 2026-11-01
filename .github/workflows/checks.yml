@@ -76,6 +76,10 @@ jobs:
     name: WooCommerce plugin
     uses: ./.github/workflows/woocommerce-plugin.yml
 
+  edd:
+    name: Easy Digital Downloads plugin
+    uses: ./.github/workflows/edd-plugin.yml
+
   pages:
     name: Pages
     uses: ./.github/workflows/pages.yml
@@ -88,7 +92,7 @@ jobs:
   required:
     name: All required checks
     if: always()
-    needs: [changes, ci, node-client, medusa, vendure, woocommerce, pages]
+    needs: [changes, ci, node-client, medusa, vendure, woocommerce, edd, pages]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
