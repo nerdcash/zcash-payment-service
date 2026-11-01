@@ -120,6 +120,10 @@ The address is derived from the canonical UIVK with Orchard required, Sapling re
 
 `GET /payments/{payment_id}` returns `PaymentStatusResponse` as JSON. `GET /pay/{payment_id}` returns the hosted pay page as HTML. Both return `404` `NotFound` for an id that isn't 32 lowercase hex characters or isn't known. Fields, statuses, and how to expose them are in [Payment links and the pay page](pay-page.md).
 
+### `POST /dev/simulate-payment` (testnet test hook)
+
+Off unless `ZCASH_DEV_SIMULATED_PAYMENTS=true` on testnet; otherwise `404`. Body `{"address": "<issued address>", "amount": "0.2"}`. Records a fake mined receipt of `amount` ZEC for that address, then queues the normal webhook. Returns `{"txid": "...", "total_received": "0.20000000"}`. It exists so store plugins can be tested end to end without a chain or funds. Never enable it on a service that takes real orders: anyone who can reach it can mark an address paid.
+
 ## Webhook
 
 This is a request the service sends, not a route it serves. `spawn_webhook_delivery_worker` starts the loop only when both `webhook_url` and `webhook_secret` are set.
@@ -178,6 +182,7 @@ Delivery outcomes are in the [integration guide](integration.md#retries). On sta
 | `ZCASH_WEBHOOK_URL` | unset | Absolute `http` or `https` URL with a host. |
 | `ZCASH_WEBHOOK_SECRET` | unset | HMAC key. Delivery runs only when this and the URL are both set. |
 | `PUBLIC_BASE_URL` | unset | Absolute `http(s)` URL, trailing `/` removed. Prefix for `pay_url`. See [Payment links](pay-page.md#exposing-the-page). |
+| `ZCASH_DEV_SIMULATED_PAYMENTS` | `false` | `true`/`false`/`1`/`0`. Enables `POST /dev/simulate-payment`. Rejected unless `ZCASH_NETWORK=testnet`. For tests only. |
 | `WEBHOOK_POLL_INTERVAL_SECONDS` | `2` | `u64`, greater than 0. |
 | `WEBHOOK_RETRY_DELAY_SECONDS` | `30` | `u64`, greater than 0. Base of the exponential backoff. |
 | `WEBHOOK_RETRY_MAX_DELAY_SECONDS` | `300` | `u64`, greater than 0. Cap on the backoff. |
@@ -202,6 +207,8 @@ A value that fails its parse or range check returns `InvalidConfig` and the proc
 - `ZCASH_WEBHOOK_URL must use http or https; got ...`
 - `ZCASH_WEBHOOK_URL must include a host; got ...`
 - the same four messages for `PUBLIC_BASE_URL`
+- `ZCASH_DEV_SIMULATED_PAYMENTS must be 'true' or 'false'`
+- `ZCASH_DEV_SIMULATED_PAYMENTS is only allowed with ZCASH_NETWORK=testnet`
 
 Setting the URL without the secret, or the secret without the URL, is allowed. The webhook worker stays off.
 
