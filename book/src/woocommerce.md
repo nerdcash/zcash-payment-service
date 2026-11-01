@@ -10,6 +10,13 @@
 4. The service sends a signed webhook each time the address's total changes. The plugin checks the `X-Signature` HMAC, ignores stale events, and calls WooCommerce's `payment_complete()` once the total covers the order. A partial payment adds an order note instead.
 5. The pay page sends the customer back to the order-received page.
 
+Edge cases the plugin handles:
+
+- **Paying again later** reuses the order's existing address, so a payment to the address the customer already saw still counts. If the order total changed since, it gets a new address, unless money already arrived; then checkout stops and an order note asks you to reconcile by hand.
+- **Funds drop after payment** (an unconfirmed transaction expires, or a reorg): the order goes **On hold** with a note.
+- **Payment for a cancelled, failed, or refunded order** is never completed automatically, since its stock may be gone. The plugin adds a note for you to review.
+- **Overlapping webhook deliveries** for one order are serialized with a database lock, and the event version is recorded only after the order update succeeds, so a failed update is retried.
+
 If the service has no public pay page (no `PUBLIC_BASE_URL` and no *Pay page base URL* setting), the customer goes straight to the order-received page, which shows the address and a wallet link.
 
 ## Setup
@@ -19,6 +26,8 @@ If the service has no public pay page (no `PUBLIC_BASE_URL` and no *Pay page bas
    ```text
    ZCASH_WEBHOOK_URL=https://shop.example.com/?rest_route=/zcash-payment/v1/webhook
    ```
+
+   Also choose `WEBHOOK_REPORT_CONFIRMATIONS` before the service's first start; it is fixed once the database exists. The default `0` reports unconfirmed (mempool) payments, so the plugin marks an order paid before the transaction is mined. That is fine for low-value or digital goods where speed matters. If a dropped transaction would cost you, set `1` or more so orders are paid only from mined transactions. Either way, if funds for a paid order later disappear, the plugin puts the order **On hold** and adds a note.
 
    The `?rest_route=` form works with any permalink setting. `https://shop.example.com/wp-json/zcash-payment/v1/webhook` also works when pretty permalinks are on.
 2. Expose the pay page publicly as described in [Exposing the page](pay-page.md#exposing-the-page) and set `PUBLIC_BASE_URL`.

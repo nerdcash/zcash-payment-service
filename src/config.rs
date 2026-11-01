@@ -268,10 +268,9 @@ impl Config {
             .transpose()?
             .unwrap_or(FINALITY_CONFIRMATIONS);
 
-        if dev_simulated_payments && network != "testnet" {
-            return Err(AppError::InvalidConfig(
-                "ZCASH_DEV_SIMULATED_PAYMENTS is only allowed with ZCASH_NETWORK=testnet".into(),
-            ));
+        if dev_simulated_payments {
+            validate_dev_simulated_payments(&network, lightwalletd_url.as_deref())
+                .map_err(AppError::InvalidConfig)?;
         }
 
         Ok(Self {
@@ -329,6 +328,23 @@ fn validate_webhook_url(webhook_url: &str) -> Result<(), AppError> {
 
 /// Checks that `value` is an absolute `http` or `https` URL with a host.
 /// The error text names the setting or field so it can be reported as-is.
+/// Simulated payments are a test hook. They are refused on mainnet, and alongside a real chain
+/// scanner, which would race with them and could later reconcile the fake receipts away.
+pub fn validate_dev_simulated_payments(
+    network: &str,
+    lightwalletd_url: Option<&str>,
+) -> Result<(), String> {
+    if network != "testnet" {
+        return Err(
+            "ZCASH_DEV_SIMULATED_PAYMENTS is only allowed with ZCASH_NETWORK=testnet".into(),
+        );
+    }
+    if lightwalletd_url.is_some() {
+        return Err("ZCASH_DEV_SIMULATED_PAYMENTS cannot be combined with LIGHTWALLETD_URL".into());
+    }
+    Ok(())
+}
+
 /// `PUBLIC_BASE_URL` is a prefix that `/pay/<id>` is appended to, so it may hold an origin and a
 /// path but no query or fragment.
 pub fn validate_public_base_url(value: &str) -> Result<(), String> {
@@ -363,7 +379,19 @@ pub fn validate_http_url(name: &str, value: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_scan_parallelism, validate_public_base_url, validate_webhook_url};
+    use super::{
+        parse_scan_parallelism, validate_dev_simulated_payments, validate_public_base_url,
+        validate_webhook_url,
+    };
+
+    #[test]
+    fn dev_simulated_payments_needs_testnet_without_scanner() {
+        assert!(validate_dev_simulated_payments("testnet", None).is_ok());
+        assert!(validate_dev_simulated_payments("mainnet", None).is_err());
+        assert!(
+            validate_dev_simulated_payments("testnet", Some("https://lwd.example:443")).is_err()
+        );
+    }
 
     #[test]
     fn public_base_url_rejects_query_and_fragment() {

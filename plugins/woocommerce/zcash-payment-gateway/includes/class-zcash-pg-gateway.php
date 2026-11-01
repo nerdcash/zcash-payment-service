@@ -16,6 +16,7 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 	const META_AMOUNT_ZAT     = '_zcash_amount_zat';
 	const META_RECEIVED_ZAT   = '_zcash_received_zat';
 	const META_STATE_VERSION  = '_zcash_state_version';
+	const META_PRICED        = '_zcash_priced_total';
 
 	public function __construct() {
 		$this->id                 = self::ID;
@@ -91,7 +92,8 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 		if ( '' === trim( (string) $this->get_option( 'service_url' ) ) || '' === (string) $this->get_option( 'webhook_secret' ) ) {
 			return false;
 		}
-		if ( 'ZEC' !== get_woocommerce_currency() && ! is_numeric( $this->get_option( 'zec_rate' ) ) ) {
+		$rate = $this->get_option( 'zec_rate' );
+		if ( 'ZEC' !== get_woocommerce_currency() && ! ( is_numeric( $rate ) && (float) $rate > 0 ) ) {
 			return false;
 		}
 		return true;
@@ -103,13 +105,24 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 			return $this->fail( __( 'Order not found.', 'zcash-payment-gateway' ) );
 		}
 
-		// Reuse an existing session if the payer comes back to pay the same order.
-		$pay_url = (string) $order->get_meta( self::META_PAY_URL );
-		if ( '' !== $pay_url && $order->get_meta( self::META_ADDRESS ) ) {
-			return array(
-				'result'   => 'success',
-				'redirect' => $this->public_pay_url( $pay_url ) ?? $this->get_return_url( $order ),
-			);
+		// Reuse the existing address if the payer comes back to pay the same order, so a payment to
+		// the address they were already shown still counts. If the order was repriced since, only
+		// start over when nothing has been received yet.
+		$priced = $order->get_total() . ' ' . $order->get_currency();
+		if ( $order->get_meta( self::META_ADDRESS ) ) {
+			if ( (string) $order->get_meta( self::META_PRICED ) === $priced ) {
+				return array(
+					'result'   => 'success',
+					'redirect' => $this->public_pay_url( (string) $order->get_meta( self::META_PAY_URL ) ) ?? $this->get_return_url( $order ),
+				);
+			}
+			if ( (int) $order->get_meta( self::META_RECEIVED_ZAT ) > 0 ) {
+				$order->add_order_note( __( 'The order total changed after a Zcash payment was received. Reconcile it by hand.', 'zcash-payment-gateway' ) );
+				return $this->fail( __( 'This order changed after payment started. Please contact the store.', 'zcash-payment-gateway' ) );
+			}
+			foreach ( array( self::META_ADDRESS, self::META_PAYMENT_ID, self::META_PAY_URL, self::META_QR_TEXT ) as $key ) {
+				$order->delete_meta_data( $key );
+			}
 		}
 
 		$amount_zat = Zcash_PG_Util::order_total_to_zat(
@@ -155,6 +168,7 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 		$order->update_meta_data( self::META_ADDRESS, (string) $session['address'] );
 		$order->update_meta_data( self::META_QR_TEXT, (string) $session['qr_text'] );
 		$order->update_meta_data( self::META_AMOUNT_ZAT, (string) $amount_zat );
+		$order->update_meta_data( self::META_PRICED, $priced );
 		$order->update_meta_data( self::META_RECEIVED_ZAT, '0' );
 		$order->update_meta_data( self::META_STATE_VERSION, '0' );
 		if ( ! empty( $session['payment_id'] ) ) {
@@ -201,17 +215,29 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 		if ( '' === $address ) {
 			return;
 		}
+		$due       = (int) $order->get_meta( self::META_AMOUNT_ZAT );
+		$received  = (int) $order->get_meta( self::META_RECEIVED_ZAT );
+		$remaining = $due - $received;
 		echo '<section class="zcash-payment-details"><h2>' . esc_html__( 'Pay with Zcash', 'zcash-payment-gateway' ) . '</h2>';
+		if ( $due > 0 && $remaining <= 0 ) {
+			echo '<p>' . esc_html__( 'Payment received. Waiting for confirmation; this page will show the order as paid shortly.', 'zcash-payment-gateway' ) . '</p></section>';
+			return;
+		}
+		if ( $this->service_reports_paid( $order ) ) {
+			echo '<p>' . esc_html__( 'Payment seen. Waiting for confirmation; refresh in a moment.', 'zcash-payment-gateway' ) . '</p></section>';
+			return;
+		}
 		echo '<p>' . esc_html(
 			sprintf(
 				/* translators: %s: ZEC amount */
-				__( 'Send %s ZEC to:', 'zcash-payment-gateway' ),
-				Zcash_PG_Util::zat_to_zec( (int) $order->get_meta( self::META_AMOUNT_ZAT ) )
+				$received > 0 ? __( 'Send the remaining %s ZEC to:', 'zcash-payment-gateway' ) : __( 'Send %s ZEC to:', 'zcash-payment-gateway' ),
+				Zcash_PG_Util::zat_to_zec( $remaining )
 			)
 		) . '</p>';
 		echo '<p style="word-break:break-all"><code>' . esc_html( $address ) . '</code></p>';
 		if ( '' !== $qr_text ) {
-			echo '<p><a class="button" href="' . esc_attr( $qr_text ) . '">' . esc_html__( 'Open in wallet', 'zcash-payment-gateway' ) . '</a></p>';
+			$uri = $received > 0 ? 'zcash:' . $address . '?amount=' . rtrim( rtrim( Zcash_PG_Util::zat_to_zec( $remaining ), '0' ), '.' ) : $qr_text;
+			echo '<p><a class="button" href="' . esc_attr( $uri ) . '">' . esc_html__( 'Open in wallet', 'zcash-payment-gateway' ) . '</a></p>';
 		}
 		$public = $this->public_pay_url( $pay_url );
 		if ( null !== $public ) {
@@ -227,6 +253,20 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 	 */
 	private function public_pay_url( string $pay_url ): ?string {
 		return Zcash_PG_Util::resolve_pay_url( $pay_url, (string) $this->get_option( 'pay_base_url' ) );
+	}
+
+	/** Asks the service whether the payment is already covered (its webhook may not have arrived). */
+	private function service_reports_paid( WC_Order $order ): bool {
+		$payment_id = (string) $order->get_meta( self::META_PAYMENT_ID );
+		if ( '' === $payment_id || ! ctype_xdigit( $payment_id ) ) {
+			return false;
+		}
+		$response = wp_remote_get( $this->service_endpoint( '/payments/' . $payment_id ), array( 'timeout' => 5 ) );
+		if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
+			return false;
+		}
+		$body = json_decode( (string) wp_remote_retrieve_body( $response ), true );
+		return is_array( $body ) && in_array( $body['status'] ?? '', array( 'paid', 'received' ), true );
 	}
 
 	private function service_endpoint( string $path ): string {
