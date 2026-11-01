@@ -1,0 +1,84 @@
+# End-to-end test stack: PrestaShop + MySQL + this service on testnet with simulated payments.
+# Needs no store, wallet, or chain accounts. See run.sh and book/src/prestashop.md.
+name: zcash-prestashop-e2e
+
+services:
+  db:
+    image: mysql:26.10@sha256:7b16ec7caa94ca7e92f4c5ec287de69d2e8738db056ceb629022951a6f6d910b
+    environment:
+      MYSQL_DATABASE: prestashop
+      MYSQL_USER: prestashop
+      MYSQL_PASSWORD: prestashop
+      MYSQL_RANDOM_ROOT_PASSWORD: "1"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uprestashop", "-pprestashop"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  prestashop:
+    image: prestashop/prestashop:9.1.5-apache@sha256:515336e3c1c50c5613f7cd7382b384fa095fba9d7d8497c80aeb3046c135c535
+    depends_on:
+      db:
+        condition: service_healthy
+    # PrestaShop redirects any request whose host isn't its shop domain, webhooks included. Apache
+    # listens on the published port and the service shares this network namespace, so the service,
+    # the browser, and the shop all use the same http://localhost:PORT address.
+    command:
+      - sh
+      - -c
+      - >-
+        sed -i "s/^Listen 80$$/Listen ${E2E_PS_PORT:-8080}/" /etc/apache2/ports.conf &&
+        sed -i "s/:80>/:${E2E_PS_PORT:-8080}>/" /etc/apache2/sites-enabled/000-default.conf &&
+        exec /tmp/docker_run.sh
+    ports:
+      - "127.0.0.1:${E2E_PS_PORT:-8080}:${E2E_PS_PORT:-8080}"
+      - "127.0.0.1:${E2E_SERVICE_PORT:-8787}:8787"
+    environment:
+      DB_SERVER: db
+      DB_USER: prestashop
+      DB_PASSWD: prestashop
+      DB_NAME: prestashop
+      PS_INSTALL_AUTO: "1"
+      PS_DOMAIN: localhost:${E2E_PS_PORT:-8080}
+      PS_FOLDER_ADMIN: admin-dev
+      PS_COUNTRY: GB
+      PS_LANGUAGE: en
+      ADMIN_MAIL: admin@example.com
+      ADMIN_PASSWD: e2e-admin-password
+    volumes:
+      - ../zcashpayment:/var/www/html/modules/zcashpayment
+      - ./setup.php:/e2e/setup.php:ro
+    healthcheck:
+      # Apache starts only after the automatic install has finished.
+      test: ["CMD", "curl", "-sf", "-o", "/dev/null", "http://localhost:${E2E_PS_PORT:-8080}/"]
+      interval: 5s
+      timeout: 5s
+      retries: 120
+      start_period: 60s
+
+  zcash-payment-service:
+    build: ../../..
+    network_mode: service:prestashop
+    depends_on:
+      - prestashop
+    environment:
+      PORT: 8787
+      APP_DATA_DIR: /data
+      ZCASH_NETWORK: testnet
+      # Incoming viewing key derived from the repository's public test key. It holds no funds.
+      ZCASH_UIVK: uivktest1ayc2s599yatrj5kgp2fr4sn0xa2enkykd858d5p7rfwq8u3u65zf3dgzdar2jqzm6nzck5laqdhhfuj849hv8t3gzkgqmecvq49420024aucsy73rxsa9222n8uczqmgus06nx80mjf5kl3tq4qnc3tjj3muhdxhmnavdfqaa8vjk7aqq03ll5sfntag00f4av72q89xwfkw3g26ez3mge8k0xt3kzs5hgzj5sz9fkqdgu4mphd
+      ZCASH_BIRTHDAY_HEIGHT: 3000000
+      ZCASH_WEBHOOK_URL: http://localhost:${E2E_PS_PORT:-8080}/index.php?fc=module&module=zcashpayment&controller=webhook
+      ZCASH_WEBHOOK_SECRET: e2e-webhook-secret
+      WEBHOOK_POLL_INTERVAL_SECONDS: 1
+      PUBLIC_BASE_URL: http://localhost:${E2E_SERVICE_PORT:-8787}
+      RETURN_URL_ALLOWED_ORIGINS: ${E2E_PS_URL:-http://localhost:8080}
+      ZCASH_DEV_SIMULATED_PAYMENTS: "true"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8787/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
