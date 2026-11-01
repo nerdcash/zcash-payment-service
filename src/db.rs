@@ -1192,9 +1192,20 @@ impl AppDb {
             return Ok(Vec::new());
         }
 
-        let now = now_rfc3339()?;
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let queued_address_ids = Self::queue_webhook_deliveries_in_tx(&tx, address_ids)?;
+        tx.commit()?;
+        Ok(queued_address_ids)
+    }
+
+    /// Queues deliveries for dirty addresses inside the caller's transaction, so callers that
+    /// change acknowledgment state can enqueue the follow-up atomically.
+    fn queue_webhook_deliveries_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        address_ids: &[i64],
+    ) -> Result<Vec<i64>, AppError> {
+        let now = now_rfc3339()?;
         let mut queued_address_ids = std::collections::BTreeSet::new();
 
         for address_id in address_ids
@@ -1273,7 +1284,6 @@ impl AppDb {
             queued_address_ids.insert(address_id);
         }
 
-        tx.commit()?;
         Ok(queued_address_ids.into_iter().collect())
     }
 
@@ -1401,10 +1411,11 @@ impl AppDb {
             params![address_id, total_received_zat, event_id, attempted_at],
         )?;
 
+        // If the total moved again while this event was in flight, queue the newer state in the
+        // same transaction. Doing it after commit would let a concurrent writer mark the address
+        // clean in between, so the newer total would never be delivered.
+        Self::queue_webhook_deliveries_in_tx(&tx, &[address_id])?;
         tx.commit()?;
-        // If the total moved again while this event was in flight, send the newer state now
-        // rather than waiting for the next scan to notice.
-        self.queue_webhook_deliveries_for_dirty_addresses(&[address_id])?;
         Ok(())
     }
 
@@ -2022,6 +2033,8 @@ fn recompute_address_totals(
         )?;
         let changed = previous.0 != current_total_zat;
         let next_state_version = if changed { previous.1 + 1 } else { previous.1 };
+        // An unchanged total keeps its existing dirty state: marking it clean here would drop a
+        // pending notification (for example one queued after an acknowledgment of an older total).
         let dirty_state = if changed { "dirty" } else { "clean" };
         let dirty_reason = if changed {
             Some(dirty_reason_label)
@@ -2035,7 +2048,7 @@ fn recompute_address_totals(
         };
 
         tx.execute(
-            "UPDATE address_totals SET finalized_through_height = ?2, finalized_total_zat = ?3, recent_total_zat = ?4, current_total_zat = ?5, last_computed_tip_height = ?6, dirty_state = ?7, dirty_reason = ?8, dirty_since_height = ?9, state_version = ?10, last_changed_at = ?11 WHERE address_id = ?1",
+            "UPDATE address_totals SET finalized_through_height = ?2, finalized_total_zat = ?3, recent_total_zat = ?4, current_total_zat = ?5, last_computed_tip_height = ?6, dirty_state = CASE WHEN ?12 THEN ?7 ELSE dirty_state END, dirty_reason = CASE WHEN ?12 THEN ?8 ELSE dirty_reason END, dirty_since_height = CASE WHEN ?12 THEN ?9 ELSE dirty_since_height END, state_version = ?10, last_changed_at = ?11 WHERE address_id = ?1",
             params![
                 address_id,
                 finalized_through_height,
@@ -2048,6 +2061,7 @@ fn recompute_address_totals(
                 dirty_since_height,
                 next_state_version,
                 now,
+                changed,
             ],
         )?;
 
@@ -2509,6 +2523,70 @@ mod tests {
             .expect("the newer zero-total state is queued");
         assert_eq!(second.event_id, format!("zcash:{}:v2", record.address_id));
         assert_eq!(second.total_received_zat, 0);
+    }
+
+    #[test]
+    fn an_unchanged_recompute_keeps_a_pending_notification() {
+        let temp = tempdir().unwrap();
+        let db = AppDb::open(temp.path().join("app.db")).unwrap();
+        let record = db
+            .insert_issued_address(NewIssuedAddress {
+                unified_address: "uaddr1keepdirty",
+                address_source: "fresh",
+                diversifier_index_be: None,
+                diversifier_bytes: None,
+                request_label: None,
+                request_memo: None,
+                request_message: None,
+                requested_amount: None,
+            })
+            .unwrap();
+        db.insert_address_receivers(
+            record.address_id,
+            &[NewAddressReceiver {
+                pool: "sapling",
+                receiver_encoding: "sapling-s",
+                receiver_fingerprint: &[4, 4, 4, 4, 4, 4, 4, 4],
+            }],
+        )
+        .unwrap();
+        let receipt = || {
+            mined_receipt(
+                record.address_id,
+                "tx-keep",
+                "sapling",
+                "tx-keep:sapling:0",
+                25,
+                400,
+                10,
+                true,
+            )
+        };
+        db.apply_attributed_receipts(&[receipt()], 409, 100)
+            .unwrap();
+        // The total is pending notification (for example right after an older total was
+        // acknowledged), then a rescan recomputes the same total.
+        let conn = rusqlite::Connection::open(temp.path().join("app.db")).unwrap();
+        conn.execute(
+            "UPDATE address_totals SET dirty_state = 'dirty' WHERE address_id = ?1",
+            rusqlite::params![record.address_id],
+        )
+        .unwrap();
+        db.apply_attributed_receipts(&[receipt()], 410, 100)
+            .unwrap();
+
+        let dirty_state: String = conn
+            .query_row(
+                "SELECT dirty_state FROM address_totals WHERE address_id = ?1",
+                rusqlite::params![record.address_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dirty_state, "dirty");
+        assert_eq!(
+            db.queue_all_dirty_webhook_deliveries().unwrap(),
+            vec![record.address_id]
+        );
     }
 
     #[test]
