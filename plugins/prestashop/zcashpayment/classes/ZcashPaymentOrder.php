@@ -7,6 +7,10 @@ if ( ! defined( '_PS_VERSION_' ) ) {
 	exit;
 }
 
+/** A read or write of the module's order table failed. Callers stop rather than guess. */
+final class ZcashPaymentDbException extends RuntimeException {
+}
+
 final class ZcashPaymentOrder {
 	const TABLE = 'zcash_payment_order';
 
@@ -50,9 +54,18 @@ final class ZcashPaymentOrder {
 	 * defaults when the order has none.
 	 *
 	 * @return array<string,mixed>
+	 * @throws ZcashPaymentDbException if the lookup failed, so a failure never reads as "no record".
 	 */
 	public static function get( int $id_order ): array {
-		$row = Db::getInstance()->getRow( 'SELECT * FROM `' . _DB_PREFIX_ . self::TABLE . '` WHERE `id_order` = ' . (int) $id_order, false );
+		$db = Db::getInstance();
+		try {
+			$row = $db->getRow( 'SELECT * FROM `' . _DB_PREFIX_ . self::TABLE . '` WHERE `id_order` = ' . (int) $id_order, false );
+		} catch ( Throwable $e ) {
+			throw new ZcashPaymentDbException( 'order ' . (int) $id_order . ': ' . $e->getMessage(), 0, $e );
+		}
+		if ( $db->getNumberError() ) {
+			throw new ZcashPaymentDbException( 'order ' . (int) $id_order . ': ' . $db->getMsgError() );
+		}
 		$out = self::DEFAULTS;
 		if ( is_array( $row ) ) {
 			foreach ( self::DEFAULTS as $key => $default ) {
@@ -62,8 +75,11 @@ final class ZcashPaymentOrder {
 		return $out;
 	}
 
-	/** @param array<string,mixed> $fields */
-	public static function set( int $id_order, array $fields ): bool {
+	/**
+	 * @param array<string,mixed> $fields
+	 * @throws ZcashPaymentDbException if the write failed, so nothing goes on as if it was saved.
+	 */
+	public static function set( int $id_order, array $fields ): void {
 		$data = array( 'id_order' => (int) $id_order );
 		foreach ( $fields as $key => $value ) {
 			if ( ! array_key_exists( $key, self::DEFAULTS ) ) {
@@ -71,13 +87,22 @@ final class ZcashPaymentOrder {
 			}
 			$data[ $key ] = is_int( self::DEFAULTS[ $key ] ) ? (int) $value : pSQL( (string) $value );
 		}
-		return Db::getInstance()->insert( self::TABLE, $data, false, false, Db::ON_DUPLICATE_KEY );
+		try {
+			$ok = Db::getInstance()->insert( self::TABLE, $data, false, false, Db::ON_DUPLICATE_KEY );
+		} catch ( Throwable $e ) {
+			throw new ZcashPaymentDbException( 'order ' . (int) $id_order . ': ' . $e->getMessage(), 0, $e );
+		}
+		if ( ! $ok ) {
+			throw new ZcashPaymentDbException( 'order ' . (int) $id_order . ': ' . Db::getInstance()->getMsgError() );
+		}
 	}
 
 	/**
 	 * The order an address was issued for: its id, null if none, or false if the lookup failed.
+	 *
+	 * @return int|false|null
 	 */
-	public static function find_by_address( string $address ): int|false|null {
+	public static function find_by_address( string $address ) {
 		$db = Db::getInstance();
 		try {
 			$row = $db->getRow( 'SELECT `id_order` FROM `' . _DB_PREFIX_ . self::TABLE . "` WHERE `address` = '" . pSQL( $address ) . "' ORDER BY `id_order` DESC", false );

@@ -1,6 +1,6 @@
 # PrestaShop module
 
-`plugins/prestashop/zcashpayment` is a [PrestaShop](https://www.prestashop-project.org) payment module that takes Zcash through your own copy of this service. It is tested on PrestaShop 9 with the default Hummingbird theme and needs PrestaShop 8.1 or later.
+`plugins/prestashop/zcashpayment` is a [PrestaShop](https://www.prestashop-project.org) payment module that takes Zcash through your own copy of this service. It is tested on PrestaShop 9 with the default Hummingbird theme and needs PrestaShop 8.1 or later on PHP 8.1 or later.
 
 ## How it works
 
@@ -16,7 +16,8 @@ Edge cases the module handles:
 - **Funds drop after payment** (an unconfirmed transaction expires, or a reorg): the order goes to **Zcash funds on hold** with a message. The module restores the earlier state only if it put the order on hold itself.
 - **Payment for a cancelled, refunded, or failed order** is never applied automatically. Moving an order with a Zcash address to one of those states, or issuing a credit slip for it, flags it for review. Later payments to it are left for you until you clear `needs_review` for the order in `zcash_payment_order`.
 - **After a partial payment**, the pay page asks only for the remaining balance. The remainder is based on receipts the service has reported (see `WEBHOOK_REPORT_CONFIRMATIONS`).
-- **Overlapping webhook deliveries** for one order are serialized with a MySQL named lock, and the event version is recorded only after the order update succeeds, so a failed update is retried.
+- **Overlapping webhook deliveries** for one order are serialized with a MySQL named lock, and the event version is recorded only after the order update succeeds, so a failed update or database error is retried. State changes and credit slips from the back office wait for the same lock, so a cancellation can't slip in between a webhook's check and its update.
+- **Carts that PrestaShop would split into several orders** (several packages or carriers) aren't offered Zcash, since one address pays exactly one order.
 
 If the service has no public pay page (no `PUBLIC_BASE_URL` and no *Pay page base URL* setting), the customer goes straight to the order confirmation page, which shows the address and a wallet link.
 
@@ -45,7 +46,7 @@ The payment option is hidden at checkout until the service URL and secret are se
 
 Installing the module adds a disabled **ZEC** currency with 8 decimal places. To price in ZEC, enable it under **International → Localization → Currencies**, and check that the module is allowed for it under **Payment → Preferences**. Order totals in ZEC are sent as-is. PrestaShop stores amounts with 6 decimal places, so prices finer than 0.000001 ZEC are not possible.
 
-If the shop prices in another currency, you must enter a fixed rate (ZEC per one unit of store currency) and keep it current yourself; the option is hidden for carts in other currencies when no rate is set. The module does not fetch prices from any third party.
+If the shop's default currency is not ZEC, you can enter a fixed rate (ZEC per one unit of that default currency) and keep it current yourself. The rate is used only for carts in the default currency; carts in any other currency, and all non-ZEC carts when no rate is set, aren't offered Zcash. The module does not fetch prices from any third party.
 
 ## Testing
 

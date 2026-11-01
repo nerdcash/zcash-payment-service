@@ -27,6 +27,13 @@ class ZcashpaymentValidationModuleFrontController extends ModuleFrontController 
 			return;
 		}
 
+		// One Zcash address pays one order, so a cart PrestaShop would split is refused.
+		if ( ! ZcashPayment::single_order( $cart ) ) {
+			$this->errors[] = $this->module->l( 'Zcash can pay for orders shipped in a single package only.', 'validation' );
+			$this->redirectWithNotifications( 'index.php?controller=order&step=1' );
+			return;
+		}
+
 		// Check the amount converts before recording an order.
 		$total = (float) $cart->getOrderTotal( true, Cart::BOTH );
 		if ( null === ZcashPaymentUtil::order_total_to_zat( sprintf( '%.6F', $total ), (string) $currency->iso_code, ZcashPayment::option( ZcashPayment::CONFIG_ZEC_RATE ) ) ) {
@@ -46,9 +53,14 @@ class ZcashpaymentValidationModuleFrontController extends ModuleFrontController 
 		// Fail the order only if it is still an open Zcash order with no address, so nothing
 		// can be paid to it; a state someone else set meanwhile is kept.
 		$order = ZcashPayment::fresh_order( $id_order );
-		if ( $order && ZcashPayment::is_ours( $order ) && ZcashPayment::is_open( (int) $order->current_state )
-			&& '' === ZcashPaymentOrder::get( $id_order )['address'] ) {
-			ZcashPayment::set_state( $id_order, (int) Configuration::get( 'PS_OS_ERROR' ) );
+		try {
+			if ( $order && ZcashPayment::is_ours( $order ) && ZcashPayment::is_open( (int) $order->current_state )
+				&& '' === ZcashPaymentOrder::get( $id_order )['address'] ) {
+				ZcashPayment::set_state( $id_order, (int) Configuration::get( 'PS_OS_ERROR' ) );
+			}
+		} catch ( ZcashPaymentDbException $e ) {
+			// Unknown whether an address was saved, so leave the order open for the merchant.
+			PrestaShopLogger::addLog( 'Zcash: ' . $e->getMessage(), 3, null, 'Order', $id_order );
 		}
 		$this->errors[] = (string) ( $result['error'] ?? '' );
 		$this->redirectWithNotifications( $order ? $module->confirmation_url( $order ) : 'index.php?controller=order&step=1' );

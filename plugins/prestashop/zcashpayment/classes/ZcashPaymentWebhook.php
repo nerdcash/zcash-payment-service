@@ -38,6 +38,11 @@ final class ZcashPaymentWebhook {
 		}
 		try {
 			return self::apply( $id_order, $observation );
+		} catch ( ZcashPaymentDbException $e ) {
+			// Nothing after the failed read or write ran; the version is unsaved, so a retry
+			// re-evaluates from scratch.
+			PrestaShopLogger::addLog( 'Zcash: webhook: ' . $e->getMessage(), 3 );
+			return array( 503, array( 'error' => 'database error, retry' ) );
 		} finally {
 			ZcashPaymentUtil::unlock( $lock );
 		}
@@ -173,6 +178,12 @@ final class ZcashPaymentWebhook {
 		if ( $g::set_state( $id_order, $g::hold_state() ) ) {
 			// The status hook clears the hold markers on any change away from the hold state,
 			// so they are set before the change and checked after.
+			return true;
+		}
+		// set_state() can fail after the hold was saved (a later hook threw). Keep the markers
+		// on an order that is held, so recovery still knows the hold is the module's own.
+		$now = $g::fresh_order( $id_order );
+		if ( $now && $g::hold_state() === (int) $now->current_state ) {
 			return true;
 		}
 		// Don't leave hold markers on an order that isn't held.

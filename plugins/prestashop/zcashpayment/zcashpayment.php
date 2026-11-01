@@ -11,10 +11,14 @@ if ( ! defined( '_PS_VERSION_' ) ) {
 	exit;
 }
 
-require_once __DIR__ . '/classes/ZcashPaymentUtil.php';
-require_once __DIR__ . '/classes/ZcashPaymentBalance.php';
-require_once __DIR__ . '/classes/ZcashPaymentOrder.php';
-require_once __DIR__ . '/classes/ZcashPaymentWebhook.php';
+// The classes need PHP 8.1. This file stays loadable on older PHP so the module list can show
+// why it won't install.
+if ( PHP_VERSION_ID >= 80100 ) {
+	require_once __DIR__ . '/classes/ZcashPaymentUtil.php';
+	require_once __DIR__ . '/classes/ZcashPaymentBalance.php';
+	require_once __DIR__ . '/classes/ZcashPaymentOrder.php';
+	require_once __DIR__ . '/classes/ZcashPaymentWebhook.php';
+}
 
 class ZcashPayment extends PaymentModule {
 	const CONFIG_SERVICE_URL    = 'ZCASH_SERVICE_URL';
@@ -23,6 +27,9 @@ class ZcashPayment extends PaymentModule {
 	const CONFIG_ZEC_RATE       = 'ZCASH_ZEC_RATE';
 	const CONFIG_OS_AWAITING    = 'ZCASH_OS_AWAITING';
 	const CONFIG_OS_HOLD        = 'ZCASH_OS_HOLD';
+
+	/** @var array<int,int> Locks taken by hookActionOrderStatusUpdate, released after the change. */
+	private $status_locks = array();
 
 	public function __construct() {
 		$this->name                   = 'zcashpayment';
@@ -43,12 +50,17 @@ class ZcashPayment extends PaymentModule {
 	}
 
 	public function install(): bool {
+		if ( PHP_VERSION_ID < 80100 ) {
+			$this->_errors[] = $this->l( 'This module needs PHP 8.1 or later.' );
+			return false;
+		}
 		return parent::install()
 			&& ZcashPaymentOrder::install()
 			&& $this->install_states()
 			&& $this->install_currency()
 			&& $this->registerHook( 'paymentOptions' )
 			&& $this->registerHook( 'displayPaymentReturn' )
+			&& $this->registerHook( 'actionOrderStatusUpdate' )
 			&& $this->registerHook( 'actionOrderStatusPostUpdate' )
 			&& $this->registerHook( 'actionOrderSlipAdd' );
 	}
@@ -203,7 +215,7 @@ class ZcashPayment extends PaymentModule {
 						'type'  => 'text',
 						'label' => $this->l( 'ZEC per unit of store currency' ),
 						'name'  => self::CONFIG_ZEC_RATE,
-						'desc'  => $this->l( 'Only for carts not priced in ZEC. A fixed rate you keep current yourself.' ),
+						'desc'  => $this->l( 'Only for carts in the shop\'s default currency, when that is not ZEC. A fixed rate you keep current yourself; carts in other currencies are not offered Zcash.' ),
 					),
 				),
 				'submit' => array( 'title' => $this->l( 'Save' ) ),
@@ -317,12 +329,32 @@ class ZcashPayment extends PaymentModule {
 
 	// ---------------------------------------------------------------- checkout
 
-	/** Whether the gateway is configured and can price a cart in this currency. */
+	/**
+	 * Whether the gateway is configured and can price a cart in this currency. The one exchange
+	 * rate describes the shop's default currency, so it is never applied to any other.
+	 */
 	public static function available_for( string $currency_iso ): bool {
 		if ( '' === self::option( self::CONFIG_SERVICE_URL ) || '' === self::option( self::CONFIG_WEBHOOK_SECRET ) ) {
 			return false;
 		}
-		return 'ZEC' === strtoupper( $currency_iso ) || '' !== self::option( self::CONFIG_ZEC_RATE );
+		$iso = strtoupper( $currency_iso );
+		if ( 'ZEC' === $iso ) {
+			return true;
+		}
+		$default = new Currency( (int) Configuration::get( 'PS_CURRENCY_DEFAULT' ) );
+		return '' !== self::option( self::CONFIG_ZEC_RATE ) && Validate::isLoadedObject( $default ) && strtoupper( (string) $default->iso_code ) === $iso;
+	}
+
+	/**
+	 * Whether the cart becomes a single order. PrestaShop splits a cart shipped in several
+	 * packages into several orders, and one Zcash address pays exactly one order.
+	 */
+	public static function single_order( Cart $cart ): bool {
+		$packages = 0;
+		foreach ( $cart->getPackageList() as $per_address ) {
+			$packages += count( $per_address );
+		}
+		return $packages <= 1;
 	}
 
 	public function hookPaymentOptions( $params ) {
@@ -330,7 +362,7 @@ class ZcashPayment extends PaymentModule {
 			return array();
 		}
 		$currency = new Currency( (int) $params['cart']->id_currency );
-		if ( ! $this->checkCurrency( $params['cart'] ) || ! self::available_for( (string) $currency->iso_code ) ) {
+		if ( ! $this->checkCurrency( $params['cart'] ) || ! self::available_for( (string) $currency->iso_code ) || ! self::single_order( $params['cart'] ) ) {
 			return array();
 		}
 		$option = new PaymentOption();
@@ -380,6 +412,10 @@ class ZcashPayment extends PaymentModule {
 		}
 		try {
 			return $this->start_session_locked( $id_order );
+		} catch ( ZcashPaymentDbException $e ) {
+			// The address, if one was minted, was never shown or saved, so it stays unused.
+			PrestaShopLogger::addLog( 'Zcash: ' . $e->getMessage(), 3 );
+			return array( 'error' => $this->l( 'Zcash payments are temporarily unavailable. Please try again.' ) );
 		} finally {
 			ZcashPaymentUtil::unlock( $lock );
 		}
@@ -471,8 +507,14 @@ class ZcashPayment extends PaymentModule {
 		$id_order = (int) $order->id;
 		$order    = self::fresh_order( $id_order ) ?? $order;
 		$state    = (int) $order->current_state;
-		$row      = ZcashPaymentOrder::get( $id_order );
-		$h        = static fn( string $s ): string => htmlspecialchars( $s, ENT_QUOTES, 'UTF-8' );
+		try {
+			$row = ZcashPaymentOrder::get( $id_order );
+		} catch ( ZcashPaymentDbException $e ) {
+			return '<p>' . htmlspecialchars( $this->l( 'The payment status can\'t be checked right now. Refresh in a moment before sending anything.' ), ENT_QUOTES, 'UTF-8' ) . '</p>';
+		}
+		$h        = static function ( string $s ): string {
+			return htmlspecialchars( $s, ENT_QUOTES, 'UTF-8' );
+		};
 		$out      = '<section class="zcash-payment-details"><h3>' . $h( $this->l( 'Pay with Zcash' ) ) . '</h3>';
 		if ( self::is_paid( $state ) ) {
 			return '<p class="zcash-payment-complete">' . $h( $this->l( 'Your Zcash payment has been received. Thank you!' ) ) . '</p>';
@@ -514,11 +556,45 @@ class ZcashPayment extends PaymentModule {
 
 	// ---------------------------------------------------------------- order changes
 
+	/**
+	 * Before any state change to a Zcash order, takes the per-order lock the webhook holds while
+	 * it checks and changes the order. A merchant's cancellation therefore waits for an
+	 * in-flight webhook, which then sees the cancellation or finishes first. The lock is
+	 * re-entrant, so the webhook's own state changes pass through.
+	 */
+	public function hookActionOrderStatusUpdate( $params ): void {
+		$id_order = (int) ( $params['id_order'] ?? 0 );
+		if ( ! $id_order || ! self::is_ours_by_id( $id_order ) ) {
+			return;
+		}
+		if ( ! ZcashPaymentUtil::lock( 'zcash_ps_order_' . $id_order ) ) {
+			// Refuse rather than race a payment being applied.
+			throw new PrestaShopException( 'A Zcash payment for this order is being processed. Try again in a moment.' );
+		}
+		$this->status_locks[ $id_order ] = ( $this->status_locks[ $id_order ] ?? 0 ) + 1;
+	}
+
 	public function hookActionOrderStatusPostUpdate( $params ): void {
 		$id_order = (int) ( $params['id_order'] ?? 0 );
 		$new      = isset( $params['newOrderStatus'] ) && is_object( $params['newOrderStatus'] ) ? (int) $params['newOrderStatus']->id : 0;
-		$row      = ZcashPaymentOrder::get( $id_order );
-		if ( ! $id_order || '' === $row['address'] ) {
+		try {
+			if ( $id_order && self::is_ours_by_id( $id_order ) ) {
+				$this->after_status_change( $id_order, $new );
+			}
+		} catch ( ZcashPaymentDbException $e ) {
+			// The state change itself already happened; don't fail the merchant's request.
+			PrestaShopLogger::addLog( 'Zcash: order ' . $id_order . ': could not update after a state change: ' . $e->getMessage(), 3, null, 'Order', $id_order );
+		} finally {
+			if ( ! empty( $this->status_locks[ $id_order ] ) ) {
+				--$this->status_locks[ $id_order ];
+				ZcashPaymentUtil::unlock( 'zcash_ps_order_' . $id_order );
+			}
+		}
+	}
+
+	private function after_status_change( int $id_order, int $new ): void {
+		$row = ZcashPaymentOrder::get( $id_order );
+		if ( '' === $row['address'] ) {
 			return;
 		}
 		$fields = array();
@@ -540,9 +616,28 @@ class ZcashPayment extends PaymentModule {
 	/** A refund (credit slip), partial ones included, leaves funds the order may no longer be owed. */
 	public function hookActionOrderSlipAdd( $params ): void {
 		$order = $params['order'] ?? null;
-		if ( $order instanceof Order && '' !== ZcashPaymentOrder::get( (int) $order->id )['address'] ) {
-			ZcashPaymentOrder::set( (int) $order->id, array( 'needs_review' => 1 ) );
+		if ( ! $order instanceof Order || ! self::is_ours( $order ) ) {
+			return;
 		}
+		$id_order = (int) $order->id;
+		$lock     = 'zcash_ps_order_' . $id_order;
+		// Wait for an in-flight webhook, so the flag lands before or after it, not in between.
+		$locked = ZcashPaymentUtil::lock( $lock );
+		try {
+			if ( '' !== ZcashPaymentOrder::get( $id_order )['address'] ) {
+				ZcashPaymentOrder::set( $id_order, array( 'needs_review' => 1 ) );
+			}
+		} catch ( ZcashPaymentDbException $e ) {
+			PrestaShopLogger::addLog( 'Zcash: order ' . $id_order . ': could not flag a credit slip for review: ' . $e->getMessage(), 3, null, 'Order', $id_order );
+		} finally {
+			if ( $locked ) {
+				ZcashPaymentUtil::unlock( $lock );
+			}
+		}
+	}
+
+	private static function is_ours_by_id( int $id_order ): bool {
+		return 'zcashpayment' === (string) Db::getInstance()->getValue( 'SELECT `module` FROM `' . _DB_PREFIX_ . 'orders` WHERE `id_order` = ' . (int) $id_order, false );
 	}
 
 	// ---------------------------------------------------------------- service
@@ -554,7 +649,11 @@ class ZcashPayment extends PaymentModule {
 
 	/** The service's current status for this order's payment link, or null if unavailable. */
 	public static function service_status( int $id_order ): ?array {
-		$row = ZcashPaymentOrder::get( $id_order );
+		try {
+			$row = ZcashPaymentOrder::get( $id_order );
+		} catch ( ZcashPaymentDbException $e ) {
+			return null;
+		}
 		if ( '' === $row['payment_id'] || ! ctype_xdigit( $row['payment_id'] ) ) {
 			return null;
 		}
