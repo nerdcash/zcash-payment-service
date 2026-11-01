@@ -8,7 +8,7 @@ its clients, and the docs stay in sync.
 
 | Component | Location | Ships as | Released by |
 | --- | --- | --- | --- |
-| Payment service (Rust crate + binary) | `Cargo.toml`, `src/` | Rust crate, and the Docker image `ghcr.io/nerdcash/zcash-payment-service` | `.github/workflows/ci.yml`: every push to `main` that touches service code pushes `:main` and `:<commit sha>` tags. `.github/workflows/release.yml`: pushing a `v<version>` tag that matches `Cargo.toml` pushes `:v<version>` and `:<version>`, and for a stable version also `:<major>.<minor>` and `:latest` |
+| Payment service (Rust crate + binary) | `Cargo.toml`, `src/` | Rust crate, and the Docker image `ghcr.io/nerdcash/zcash-payment-service` | `.github/workflows/ci.yml`: every push to `main` that touches service code pushes `:main` and `:<commit sha>` tags. `.github/workflows/release.yml`: pushing a `v<version>` tag that matches `Cargo.toml` pushes `:v<version>` and `:<version>`, and for a stable version also `:<major>.<minor>` (if it is the newest patch in that series) and `:latest` (if it is the newest stable release) |
 | Node client | `clients/node/` | npm package `@nerdcash/zcash-payment-client` | `.github/workflows/publish-node-client.yml`: pushing a `client-node-v<version>` tag publishes to npm with trusted publishing and provenance |
 | Guide (mdBook) | `book/` | GitHub Pages site | `.github/workflows/pages.yml`: every push to `main` |
 | Reference docs | `README.md`, `docs/`, `design.md`, `src/spec.md`, `specs/` | Read in the repo | n/a |

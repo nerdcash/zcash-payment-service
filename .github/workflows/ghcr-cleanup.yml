@@ -39,6 +39,10 @@ jobs:
           # SHA tags total (current plus four older).
           exclude-tags: main,latest,v*,*.*
           keep-n-tagged: 4
+          # Skip anything pushed in the last day, so a cleanup that overlaps an in-progress
+          # publish (ci.yml or release.yml) can't delete platform manifests before their
+          # tagged multi-arch index exists.
+          older-than: 1 day
           delete-untagged: true
           delete-orphaned-images: true
           delete-partial-images: true

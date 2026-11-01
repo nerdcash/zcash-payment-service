@@ -6,7 +6,9 @@ name: Release
 #   git tag v0.2.0 && git push origin v0.2.0
 #
 # The tag must match `version` in Cargo.toml. A tag with a pre-release suffix (v0.2.0-rc.1)
-# publishes only its own tag. A stable tag also moves :<major>.<minor> and :latest.
+# publishes only its own tag. A stable tag also moves :<major>.<minor> when it is the newest
+# stable patch in that series, and :latest when it is the newest stable release overall, so
+# re-running or publishing an older release never moves those aliases backwards.
 
 on:
   push:
@@ -16,8 +18,10 @@ on:
 permissions:
   contents: read
 
+# One release at a time, so two tags pushed together can't race on the shared aliases. If GitHub
+# cancels a queued run because a newer one queued behind it, re-run the cancelled one.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
@@ -51,13 +55,22 @@ jobs:
             echo "::error::Tag $REF_NAME does not match Cargo.toml version $crate_version"
             exit 1
           fi
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          prerelease="${BASH_REMATCH[4]}"
+          git fetch --quiet --force --tags origin
+          stable='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          newest="$(git tag -l 'v*' | grep -E "$stable" | sort -V | tail -n1 || true)"
+          newest_in_minor="$(git tag -l "v$major.$minor.*" | grep -E "$stable" | sort -V | tail -n1 || true)"
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/zcash-payment-service"
           {
             echo "tags<<EOF"
             echo "$image:v$version"
             echo "$image:$version"
-            if [ -z "${BASH_REMATCH[4]}" ]; then
-              echo "$image:${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+            if [ -z "$prerelease" ] && [ "$REF_NAME" = "$newest_in_minor" ]; then
+              echo "$image:$major.$minor"
+            fi
+            if [ -z "$prerelease" ] && [ "$REF_NAME" = "$newest" ]; then
               echo "$image:latest"
             fi
             echo "EOF"
