@@ -7,3 +7,4 @@
   - [Node.js client](node-client.md)
 - [API reference](api.md)
 - [Deployment](deployment.md)
+- [Comparison with other processors](comparison.md)
