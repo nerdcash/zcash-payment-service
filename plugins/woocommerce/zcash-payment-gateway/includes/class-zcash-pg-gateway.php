@@ -105,9 +105,25 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 			return $this->fail( __( 'Order not found.', 'zcash-payment-gateway' ) );
 		}
 
-		// Reuse the existing address if the payer comes back to pay the same order, so a payment to
-		// the address they were already shown still counts. If the order was repriced since, only
-		// start over when nothing has been received yet.
+		// Checkout and webhooks share one per-order lock, so two checkouts cannot both mint a
+		// session and a webhook never sees a half-written one.
+		$lock = 'zcash_pg_order_' . $order->get_id();
+		if ( ! Zcash_PG_Util::lock( $lock ) ) {
+			return $this->fail( __( 'This order is busy. Please try again.', 'zcash-payment-gateway' ) );
+		}
+		try {
+			$order = wc_get_order( $order_id );
+			return $order ? $this->start_session( $order ) : $this->fail( __( 'Order not found.', 'zcash-payment-gateway' ) );
+		} finally {
+			Zcash_PG_Util::unlock( $lock );
+		}
+	}
+
+	/** Creates (or reuses) the order's payment session. Runs under the per-order lock. */
+	private function start_session( WC_Order $order ) {
+		// An order keeps one address for life: a payment to an address the payer was already
+		// shown must always reach this order. Reuse it when the price is unchanged; if the
+		// order was repriced, stop and let the merchant reconcile instead of minting another.
 		$priced = $order->get_total() . ' ' . $order->get_currency();
 		if ( $order->get_meta( self::META_ADDRESS ) ) {
 			if ( (string) $order->get_meta( self::META_PRICED ) === $priced ) {
@@ -116,13 +132,8 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 					'redirect' => $this->public_pay_url( (string) $order->get_meta( self::META_PAY_URL ) ) ?? $this->get_return_url( $order ),
 				);
 			}
-			if ( (int) $order->get_meta( self::META_RECEIVED_ZAT ) > 0 ) {
-				$order->add_order_note( __( 'The order total changed after a Zcash payment was received. Reconcile it by hand.', 'zcash-payment-gateway' ) );
-				return $this->fail( __( 'This order changed after payment started. Please contact the store.', 'zcash-payment-gateway' ) );
-			}
-			foreach ( array( self::META_ADDRESS, self::META_PAYMENT_ID, self::META_PAY_URL, self::META_QR_TEXT ) as $key ) {
-				$order->delete_meta_data( $key );
-			}
+			$order->add_order_note( __( 'The order total changed after a Zcash address was issued. Reconcile it by hand.', 'zcash-payment-gateway' ) );
+			return $this->fail( __( 'This order changed after payment started. Please contact the store.', 'zcash-payment-gateway' ) );
 		}
 
 		$amount_zat = Zcash_PG_Util::order_total_to_zat(
@@ -206,7 +217,7 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 	 */
 	public function thankyou_page( $order_id ) {
 		$order = wc_get_order( $order_id );
-		if ( ! $order || $order->is_paid() ) {
+		if ( ! $order || $order->is_paid() || $order->has_status( array( 'cancelled', 'failed', 'refunded' ) ) ) {
 			return;
 		}
 		$address = (string) $order->get_meta( self::META_ADDRESS );

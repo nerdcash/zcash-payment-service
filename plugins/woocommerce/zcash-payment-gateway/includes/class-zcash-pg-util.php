@@ -108,4 +108,15 @@ final class Zcash_PG_Util {
 			'state_version'  => (int) $m[1],
 		);
 	}
+
+	/** Takes a MySQL named lock, waiting up to 10 seconds. */
+	public static function lock( string $name ): bool {
+		global $wpdb;
+		return '1' === (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 10)', $name ) );
+	}
+
+	public static function unlock( string $name ): void {
+		global $wpdb;
+		$wpdb->query( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $name ) );
+	}
 }

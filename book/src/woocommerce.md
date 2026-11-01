@@ -15,6 +15,8 @@ Edge cases the plugin handles:
 - **Paying again later** reuses the order's existing address, so a payment to the address the customer already saw still counts. If the order total changed since, it gets a new address, unless money already arrived; then checkout stops and an order note asks you to reconcile by hand.
 - **Funds drop after payment** (an unconfirmed transaction expires, or a reorg): the order goes **On hold** with a note.
 - **Payment for a cancelled, failed, or refunded order** is never completed automatically, since its stock may be gone. The plugin adds a note for you to review.
+- **An order keeps one Zcash address for life.** If you change an order's total after its address was issued, checkout stops and a payment arriving at the old address is noted for you to reconcile rather than completing the order. The same applies if the customer switches the order to another payment method.
+- **After a partial payment**, the pay page's QR code and wallet link ask only for the remaining balance.
 - **Overlapping webhook deliveries** for one order are serialized with a database lock, and the event version is recorded only after the order update succeeds, so a failed update is retried.
 
 If the service has no public pay page (no `PUBLIC_BASE_URL` and no *Pay page base URL* setting), the customer goes straight to the order-received page, which shows the address and a wallet link.

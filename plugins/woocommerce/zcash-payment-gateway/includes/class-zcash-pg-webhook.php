@@ -52,13 +52,13 @@ final class Zcash_PG_Webhook {
 
 		// Serialize deliveries for one order so the version check and the update are atomic.
 		$lock = 'zcash_pg_order_' . $order->get_id();
-		if ( ! self::lock( $lock ) ) {
+		if ( ! Zcash_PG_Util::lock( $lock ) ) {
 			return new WP_REST_Response( array( 'error' => 'busy, retry' ), 503 );
 		}
 		try {
 			return self::apply( $order->get_id(), $observation );
 		} finally {
-			self::unlock( $lock );
+			Zcash_PG_Util::unlock( $lock );
 		}
 	}
 
@@ -66,7 +66,7 @@ final class Zcash_PG_Webhook {
 	private static function apply( int $order_id, array $observation ): WP_REST_Response {
 		// Re-read inside the lock so we see any delivery that finished while we waited.
 		$order = wc_get_order( $order_id );
-		if ( ! $order ) {
+		if ( ! $order || ! hash_equals( (string) $order->get_meta( Zcash_PG_Gateway::META_ADDRESS ), $observation['address'] ) ) {
 			return new WP_REST_Response( array( 'ok' => true, 'ignored' => 'unknown address' ), 200 );
 		}
 
@@ -80,7 +80,27 @@ final class Zcash_PG_Webhook {
 		$due   = (int) $order->get_meta( Zcash_PG_Gateway::META_AMOUNT_ZAT );
 		$zec   = Zcash_PG_Util::zat_to_zec( $total );
 
-		if ( $order->is_paid() ) {
+		$priced_now  = $order->get_total() . ' ' . $order->get_currency();
+		$review_note = null;
+		if ( Zcash_PG_Gateway::ID !== $order->get_payment_method() ) {
+			// The payer switched to another gateway; this Zcash session is abandoned.
+			$review_note = sprintf(
+				/* translators: %s: received ZEC */
+				__( 'Received %s ZEC at this order\'s abandoned Zcash address, but the order now uses another payment method. Not applied; refund or reconcile by hand.', 'zcash-payment-gateway' ),
+				$zec
+			);
+		} elseif ( ! $order->is_paid() && (string) $order->get_meta( Zcash_PG_Gateway::META_PRICED ) !== $priced_now ) {
+			$review_note = sprintf(
+				/* translators: %s: received ZEC */
+				__( 'Received %s ZEC, but the order total changed after the Zcash amount was set. Not completed automatically; reconcile by hand.', 'zcash-payment-gateway' ),
+				$zec
+			);
+		}
+
+		if ( null !== $review_note ) {
+			wc_get_logger()->warning( 'Order ' . $order->get_id() . ': ' . $review_note, array( 'source' => Zcash_PG_Gateway::ID ) );
+			$order->add_order_note( $review_note );
+		} elseif ( $order->is_paid() ) {
 			if ( $due > 0 && $total < $due ) {
 				// A receipt was dropped (expired from the mempool or undone by a reorg).
 				$message = sprintf(
@@ -159,16 +179,6 @@ final class Zcash_PG_Webhook {
 			return null;
 		}
 		return $order;
-	}
-
-	private static function lock( string $name ): bool {
-		global $wpdb;
-		return '1' === (string) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, 10)', $name ) );
-	}
-
-	private static function unlock( string $name ): void {
-		global $wpdb;
-		$wpdb->query( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $name ) );
 	}
 
 	private static function gateway(): ?Zcash_PG_Gateway {
