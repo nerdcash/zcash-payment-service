@@ -122,7 +122,7 @@ The address is derived from the canonical UIVK with Orchard required, Sapling re
 
 ### `POST /dev/simulate-payment` (testnet test hook)
 
-Off unless `ZCASH_DEV_SIMULATED_PAYMENTS=true` on testnet with no `LIGHTWALLETD_URL`; otherwise `404`. Body `{"address": "<issued address>", "amount": "0.2"}`. Records a fake mined receipt of `amount` ZEC for that address, then queues the normal webhook. Returns `{"txid": "...", "total_received": "0.20000000"}`. It exists so store plugins can be tested end to end without a chain or funds. Never enable it on a service that takes real orders: anyone who can reach it can mark an address paid.
+Off unless `ZCASH_DEV_SIMULATED_PAYMENTS=true` on testnet with no `LIGHTWALLETD_URL`; otherwise `404`. Body `{"address": "<issued address>", "amount": "0.2"}`. Records a fake mined receipt of `amount` ZEC for that address, then queues the normal webhook. Returns `{"txid": "...", "total_received": "0.20000000"}`. Two optional fields drive confirmation depth deterministically: `confirmations` (`0` records a mempool receipt, `n` a receipt with `n` confirmations; omitted means fully confirmed) and `txid` (re-reports an earlier simulated transaction, for example at a deeper `confirmations`, instead of adding a new one). It exists so store plugins can be tested end to end without a chain or funds. Never enable it on a service that takes real orders: anyone who can reach it can mark an address paid.
 
 ## Webhook
 
@@ -145,10 +145,13 @@ The stored JSON is `serde_json::to_string` of these fields, in this order:
 | `address` | `issued_addresses.unified_address` |
 | `total_received` | Eligible zatoshis rendered as ZEC |
 | `observed_at` | RFC 3339 UTC time when the row was queued |
+| `received_by_confirmations` | Only when `REQUIRED_CONFIRMATIONS` is set: array of N+1 ZEC strings, see below |
 
 `format_zat_as_zec` divides the absolute zatoshis by `100_000_000` and prints the remainder in 8 digits. `12345678` zatoshis become `0.12345678`. `100000000` become `1.00000000`. A negative `i64` gets a leading `-`.
 
-`state_version` increments by one when `current_total_zat` changes. `current_total_zat` is the sum of `value_zat` over receipts for that address that are `active` and `eligible_for_webhook`. A delivery is inserted when `dirty_state` is `dirty` and the current total differs from `last_notified_total_zat`. `event_id` is unique, and the insert is `INSERT OR IGNORE`.
+`received_by_confirmations` element `i` sums the same `active`, eligible receipts that have a confirmation depth of at least `i` at the tip the address was last computed for (mempool receipts have depth `0`). Element 0 therefore always equals `total_received`, and the array never increases from left to right. It is stored as `address_totals.received_by_confirmations` and copied into the delivery row, so retries resend the exact signed body.
+
+`state_version` increments by one when `current_total_zat` changes, or when `received_by_confirmations` changes (a new block deepening a receipt, a reorg, or a mempool expiry). `current_total_zat` is the sum of `value_zat` over receipts for that address that are `active` and `eligible_for_webhook`. A delivery is inserted when `dirty_state` is `dirty` and the current total, or the current `received_by_confirmations`, differs from the newest outstanding or acknowledged one. Once every element equals element 0 the array stops changing, so no further deliveries are queued for that address until funds arrive or a reorg undoes a block. `event_id` is unique, and the insert is `INSERT OR IGNORE`.
 
 `claim_ready_webhook_delivery` takes the oldest row that is `queued`, or `retry_wait` with `next_attempt_at` already due, ordered by `observed_at` then `delivery_id`. A newer queued delivery can be sent while an older one is still in `retry_wait`. Receivers should keep the highest `state_version` they have applied for an address. A later delivery of a lower version is an older total, including after a reorg where the newer total is smaller.
 
@@ -190,6 +193,7 @@ Delivery outcomes are in the [integration guide](integration.md#retries). On sta
 | `WEBHOOK_MAX_ATTEMPTS` | `8` | `u32`, greater than 0. |
 | `WEBHOOK_REPORT_CONFIRMATIONS` | `0` | `u32`. `0` includes provisional mempool receipts. |
 | `FINALITY_CONFIRMATIONS` | `100` | `u32`. Stored and used for checkpointing. Does not gate `total_received`. |
+| `REQUIRED_CONFIRMATIONS` | unset | `u32` N, at most `100` and at most `FINALITY_CONFIRMATIONS`. Adds `received_by_confirmations` (N+1 elements) to webhooks and `GET /payments/{id}`. Requires `WEBHOOK_REPORT_CONFIRMATIONS=0`, because element 0 includes mempool receipts. Unset (the default, and every existing database) omits the field. |
 | `RUST_LOG` | `info` | `tracing-subscriber` `EnvFilter` directive. |
 
 A value that fails its parse or range check returns `InvalidConfig` and the process does not listen. The error strings include:
@@ -202,6 +206,10 @@ A value that fails its parse or range check returns `InvalidConfig` and the proc
 - the same pair of messages for `SYNC_POLL_INTERVAL_SECONDS`, `WEBHOOK_POLL_INTERVAL_SECONDS`, `WEBHOOK_RETRY_DELAY_SECONDS`, `WEBHOOK_RETRY_MAX_DELAY_SECONDS`, and `WEBHOOK_MAX_ATTEMPTS`
 - `WEBHOOK_REPORT_CONFIRMATIONS must be a non-negative integer`
 - `FINALITY_CONFIRMATIONS must be a non-negative integer`
+- `REQUIRED_CONFIRMATIONS must be a non-negative integer`
+- `REQUIRED_CONFIRMATIONS needs WEBHOOK_REPORT_CONFIRMATIONS=0, because received_by_confirmations[0] includes mempool receipts`
+- `REQUIRED_CONFIRMATIONS must be at most 100`
+- `REQUIRED_CONFIRMATIONS must not exceed FINALITY_CONFIRMATIONS`
 - `APP_DB_PATH and WALLET_DB_PATH must point to different files`
 - `ZCASH_WEBHOOK_URL must be a valid absolute http(s) URL; got ...`
 - `ZCASH_WEBHOOK_URL must be an absolute http(s) URL; got ...`
@@ -252,6 +260,8 @@ On a later start:
 `WalletView::decode` then requires the canonical UIVK to decode for that network and to contain Orchard and Sapling (`configured UIVK must contain Orchard and Sapling receivers`). If the wallet database UIVK does not match the decoded canonical form, startup fails with `wallet DB UIVK does not match the decoded canonical wallet view`.
 
 `ensure_service_metadata` inserts the confirmation settings on first start. A later start fails with `stored service metadata confirmation settings do not match the configured constants` when `WEBHOOK_REPORT_CONFIRMATIONS` or `FINALITY_CONFIRMATIONS` differs from that row.
+
+`REQUIRED_CONFIRMATIONS` is deliberately not fixed at database creation. The array is derived from stored receipt heights rather than accumulated, so it can be rebuilt at any time. The setting is stored in `service_metadata.required_confirmations` (a nullable column added to existing databases on startup, `NULL` meaning off). When a start's value differs from the stored one, every address's array is rebuilt from its receipts in one transaction. That rebuild is silent: it does not bump `state_version` or queue webhooks, so changing the setting does not flood your endpoint. The next real change for an address (new funds, a new block deepening a receipt, a reorg) carries the new shape. Turning it off makes the field disappear from later events.
 
 The scan loop builds keys from the environment variable `ZCASH_UIVK` on every iteration, not from the stored identity alone. Lightwalletd calls in `src/scanner.rs` request blocks by height, the latest block, tree state, the mempool stream, mempool transaction ids, and raw transactions by id. Those requests do not send the UIVK. Decryption uses scanning keys built locally from that UIVK.
 

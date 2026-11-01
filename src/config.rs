@@ -36,6 +36,9 @@ pub struct Config {
     pub webhook_max_attempts: u32,
     pub webhook_report_confirmations: u32,
     pub finality_confirmations: u32,
+    /// `REQUIRED_CONFIRMATIONS`: when set to N, webhooks and the status route also report
+    /// `received_by_confirmations`, the total received at each depth from 0 (mempool) to N.
+    pub required_confirmations: Option<u32>,
     /// Public origin (and optional path prefix) where payers reach the pay page.
     pub public_base_url: Option<String>,
     /// Enables `POST /dev/simulate-payment`. Testnet only; for automated tests.
@@ -275,6 +278,24 @@ impl Config {
             .transpose()?
             .unwrap_or(FINALITY_CONFIRMATIONS);
 
+        let required_confirmations = env::var("REQUIRED_CONFIRMATIONS")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                value.trim().parse::<u32>().map_err(|_| {
+                    AppError::InvalidConfig(
+                        "REQUIRED_CONFIRMATIONS must be a non-negative integer".into(),
+                    )
+                })
+            })
+            .transpose()?;
+        validate_required_confirmations(
+            required_confirmations,
+            webhook_report_confirmations,
+            finality_confirmations,
+        )
+        .map_err(AppError::InvalidConfig)?;
+
         if dev_simulated_payments {
             validate_dev_simulated_payments(&network, lightwalletd_url.as_deref())
                 .map_err(AppError::InvalidConfig)?;
@@ -301,6 +322,7 @@ impl Config {
             webhook_max_attempts,
             webhook_report_confirmations,
             finality_confirmations,
+            required_confirmations,
             public_base_url,
             dev_simulated_payments,
             return_url_allowed_origins,
@@ -336,6 +358,36 @@ fn validate_webhook_url(webhook_url: &str) -> Result<(), AppError> {
 
 /// Checks that `value` is an absolute `http` or `https` URL with a host.
 /// The error text names the setting or field so it can be reported as-is.
+/// Upper bound for `REQUIRED_CONFIRMATIONS`, which keeps webhook bodies small.
+pub const MAX_REQUIRED_CONFIRMATIONS: u32 = 100;
+
+/// `received_by_confirmations[0]` includes mempool receipts, so it needs the provisional mempool
+/// mode (`WEBHOOK_REPORT_CONFIRMATIONS=0`). Depths past `FINALITY_CONFIRMATIONS` are out of the
+/// reorg window the scanner maintains, so they are refused too.
+pub fn validate_required_confirmations(
+    required_confirmations: Option<u32>,
+    webhook_report_confirmations: u32,
+    finality_confirmations: u32,
+) -> Result<(), String> {
+    let Some(required) = required_confirmations else {
+        return Ok(());
+    };
+    if webhook_report_confirmations != 0 {
+        return Err(
+            "REQUIRED_CONFIRMATIONS needs WEBHOOK_REPORT_CONFIRMATIONS=0, because received_by_confirmations[0] includes mempool receipts".into(),
+        );
+    }
+    if required > MAX_REQUIRED_CONFIRMATIONS {
+        return Err(format!(
+            "REQUIRED_CONFIRMATIONS must be at most {MAX_REQUIRED_CONFIRMATIONS}"
+        ));
+    }
+    if required > finality_confirmations {
+        return Err("REQUIRED_CONFIRMATIONS must not exceed FINALITY_CONFIRMATIONS".into());
+    }
+    Ok(())
+}
+
 /// Simulated payments are a test hook. They are refused on mainnet, and alongside a real chain
 /// scanner, which would race with them and could later reconcile the fake receipts away.
 pub fn validate_dev_simulated_payments(
@@ -523,5 +575,16 @@ mod tests {
         assert!(error
             .to_string()
             .contains("ZCASH_WEBHOOK_URL must be an absolute http(s) URL"));
+    }
+
+    #[test]
+    fn required_confirmations_needs_mempool_mode_and_a_bounded_depth() {
+        use super::validate_required_confirmations as check;
+        assert!(check(None, 3, 100).is_ok());
+        assert!(check(Some(0), 0, 100).is_ok());
+        assert!(check(Some(10), 0, 100).is_ok());
+        assert!(check(Some(10), 1, 100).is_err());
+        assert!(check(Some(101), 0, 1000).is_err());
+        assert!(check(Some(20), 0, 10).is_err());
     }
 }

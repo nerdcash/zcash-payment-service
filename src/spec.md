@@ -86,6 +86,7 @@ The current implementation uses:
 | `WEBHOOK_RETRY_MAX_DELAY_SECONDS` | `300` | Max retry delay cap for exponential webhook backoff |
 | `WEBHOOK_MAX_ATTEMPTS` | `8` | Total delivery attempts before a retryable webhook failure becomes permanent |
 | `WEBHOOK_REPORT_CONFIRMATIONS` | `0` | Minimum confirmations before a receipt affects `total_received`; `0` also enables provisional mempool receipt reporting for up to 24 hours |
+| `REQUIRED_CONFIRMATIONS` | unset | N. Adds `received_by_confirmations` (N+1 totals, index `i` = received with at least `i` confirmations) to webhooks and the status route. Needs `WEBHOOK_REPORT_CONFIRMATIONS=0`; at most 100 and at most `FINALITY_CONFIRMATIONS`. May change between starts. |
 | `FINALITY_CONFIRMATIONS` | `100` | Finality boundary used for checkpointing and aggregation optimization |
 
 ### Startup integrity rules

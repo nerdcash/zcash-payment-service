@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   createZcashPaymentClient,
   PaymentServiceError,
+  receivedWithConfirmations,
   WebhookPayloadError,
   WebhookSignatureError,
 } from "../src/index.js";
@@ -151,6 +152,16 @@ describe("verifyWebhook", () => {
     assert.throws(() => client.verifyWebhook(Buffer.from(tampered), sign(body)), WebhookSignatureError);
   });
 
+  it("passes received_by_confirmations through and rejects a malformed one", () => {
+    const withDepths = { ...observation, received_by_confirmations: ["0.04000000", "0.04000000", "0.00000000"] };
+    const body = JSON.stringify(withDepths);
+    assert.deepEqual(client.verifyWebhook(Buffer.from(body), sign(body)), withDepths);
+    for (const bad of [[], "0.1", [1], [""], Array(102).fill("0.00000000")]) {
+      const badBody = JSON.stringify({ ...observation, received_by_confirmations: bad });
+      assert.throws(() => client.verifyWebhook(Buffer.from(badBody), sign(badBody)), WebhookPayloadError);
+    }
+  });
+
   it("rejects signed but invalid payloads", () => {
     for (const body of [
       "not json",
@@ -192,6 +203,16 @@ describe("getPayment", () => {
     assert.equal(calls[0]?.init?.method, "GET");
   });
 
+  it("reads received_by_confirmations from the status route", async () => {
+    const withDepths = { ...status, received_by_confirmations: ["0.20000000", "0.00000000"] };
+    const client = createZcashPaymentClient({
+      baseUrl: "http://service.test",
+      webhookSecret: SECRET,
+      fetchImpl: fakeFetch(200, JSON.stringify(withDepths)),
+    });
+    assert.deepEqual(await client.getPayment(id), withDepths);
+  });
+
   it("rejects malformed ids without calling the service", async () => {
     const calls: Call[] = [];
     const client = createZcashPaymentClient({
@@ -221,5 +242,15 @@ describe("getPayment", () => {
       fetchImpl: fakeFetch(200, JSON.stringify({ ...status, status: "maybe" })),
     });
     await assert.rejects(odd.getPayment(id), PaymentServiceError);
+  });
+});
+
+describe("receivedWithConfirmations", () => {
+  it("indexes the array and falls back to total_received", () => {
+    const depths = { total_received: "0.3", received_by_confirmations: ["0.3", "0.2", "0.1"] };
+    assert.equal(receivedWithConfirmations(depths, 0), "0.3");
+    assert.equal(receivedWithConfirmations(depths, 2), "0.1");
+    assert.equal(receivedWithConfirmations(depths, 9), "0.1");
+    assert.equal(receivedWithConfirmations({ total_received: "0.3" }, 2), "0.3");
   });
 });

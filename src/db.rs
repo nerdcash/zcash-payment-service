@@ -59,6 +59,8 @@ pub struct PaymentLinkRecord {
     pub created_at: String,
     pub current_total_zat: i64,
     pub state_version: i64,
+    /// Zatoshis received at each depth from 0 to `REQUIRED_CONFIRMATIONS`, when tracked.
+    pub received_by_confirmations_zat: Option<Vec<i64>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -292,6 +294,63 @@ impl AppDb {
     }
 
     pub fn ensure_service_metadata(&self, config: &Config) -> Result<ServiceMetadata, AppError> {
+        let metadata = self.ensure_service_metadata_row(config)?;
+        self.apply_required_confirmations(config.required_confirmations)?;
+        Ok(metadata)
+    }
+
+    /// Stores `REQUIRED_CONFIRMATIONS` and, when it changed, rebuilds every address's
+    /// `received_by_confirmations` from its receipts. Unlike the other confirmation settings it
+    /// is not fixed at database creation: the array is derived from receipt heights, so it can be
+    /// recomputed at any time. The rebuild is silent (no state version bump and no webhook), so
+    /// changing the setting does not send a burst of events; the next real change reports the new
+    /// shape.
+    pub fn apply_required_confirmations(
+        &self,
+        required_confirmations: Option<u32>,
+    ) -> Result<(), AppError> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stored: Option<i64> = tx
+            .query_row(
+                "SELECT required_confirmations FROM service_metadata WHERE singleton_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let wanted = required_confirmations.map(i64::from);
+        if stored == wanted {
+            tx.commit()?;
+            return Ok(());
+        }
+        tx.execute(
+            "UPDATE service_metadata SET required_confirmations = ?1 WHERE singleton_id = 1",
+            params![wanted],
+        )?;
+        let mut statement =
+            tx.prepare("SELECT address_id, last_computed_tip_height FROM address_totals")?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        for (address_id, tip_height) in rows {
+            let array = received_by_confirmations_zat(&tx, address_id, tip_height, wanted)?;
+            tx.execute(
+                "UPDATE address_totals SET received_by_confirmations = ?2 WHERE address_id = ?1",
+                params![address_id, encode_zat_array(array.as_deref())],
+            )?;
+        }
+        tracing::info!(
+            previous = ?stored,
+            required_confirmations = ?wanted,
+            "REQUIRED_CONFIRMATIONS changed; rebuilt received_by_confirmations for every address"
+        );
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn ensure_service_metadata_row(&self, config: &Config) -> Result<ServiceMetadata, AppError> {
         let existing = self.service_metadata()?;
         match existing {
             Some(metadata) => {
@@ -659,7 +718,7 @@ impl AppDb {
     ) -> Result<Option<PaymentLinkRecord>, AppError> {
         let conn = self.connect()?;
         conn.query_row(
-            "SELECT payment_links.payment_id, issued_addresses.unified_address, issued_addresses.request_label, issued_addresses.request_memo, issued_addresses.request_message, issued_addresses.requested_amount, payment_links.return_url, payment_links.created_at, address_totals.current_total_zat, address_totals.state_version FROM payment_links INNER JOIN issued_addresses ON issued_addresses.address_id = payment_links.address_id INNER JOIN address_totals ON address_totals.address_id = payment_links.address_id WHERE payment_links.payment_id = ?1",
+            "SELECT payment_links.payment_id, issued_addresses.unified_address, issued_addresses.request_label, issued_addresses.request_memo, issued_addresses.request_message, issued_addresses.requested_amount, payment_links.return_url, payment_links.created_at, address_totals.current_total_zat, address_totals.state_version, address_totals.received_by_confirmations FROM payment_links INNER JOIN issued_addresses ON issued_addresses.address_id = payment_links.address_id INNER JOIN address_totals ON address_totals.address_id = payment_links.address_id WHERE payment_links.payment_id = ?1",
             params![payment_id],
             |row| {
                 Ok(PaymentLinkRecord {
@@ -673,6 +732,9 @@ impl AppDb {
                     created_at: row.get(7)?,
                     current_total_zat: row.get(8)?,
                     state_version: row.get(9)?,
+                    received_by_confirmations_zat: decode_zat_array(
+                        row.get::<_, Option<String>>(10)?.as_deref(),
+                    ),
                 })
             },
         )
@@ -1305,9 +1367,9 @@ impl AppDb {
             .copied()
             .collect::<std::collections::BTreeSet<_>>()
         {
-            let Some((address, current_total_zat, last_notified_total_zat, state_version, dirty_state)) = tx
+            let Some((address, current_total_zat, last_notified_total_zat, state_version, dirty_state, current_by_confirmations, last_notified_by_confirmations)) = tx
                 .query_row(
-                    "SELECT issued_addresses.unified_address, address_totals.current_total_zat, address_totals.last_notified_total_zat, address_totals.state_version, address_totals.dirty_state FROM address_totals INNER JOIN issued_addresses ON issued_addresses.address_id = address_totals.address_id WHERE address_totals.address_id = ?1",
+                    "SELECT issued_addresses.unified_address, address_totals.current_total_zat, address_totals.last_notified_total_zat, address_totals.state_version, address_totals.dirty_state, address_totals.received_by_confirmations, address_totals.last_notified_by_confirmations FROM address_totals INNER JOIN issued_addresses ON issued_addresses.address_id = address_totals.address_id WHERE address_totals.address_id = ?1",
                     params![address_id],
                     |row| {
                         Ok((
@@ -1316,6 +1378,8 @@ impl AppDb {
                             row.get::<_, i64>(2)?,
                             row.get::<_, i64>(3)?,
                             row.get::<_, String>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, Option<String>>(6)?,
                         ))
                     },
                 )
@@ -1331,17 +1395,21 @@ impl AppDb {
             // total if one is still pending, otherwise the last acknowledged total. Comparing only
             // with the acknowledged total would drop a change back to it (for example a receipt
             // dropped while its delivery is in flight), leaving the older event as the last word.
-            let outstanding_total_zat: Option<i64> = tx
+            let outstanding: Option<(i64, Option<String>)> = tx
                 .query_row(
                     // Only deliveries newer than the acknowledged one count: an older retry is
                     // already superseded and the receiver will ignore it.
-                    "SELECT total_received_zat FROM webhook_deliveries WHERE address_id = ?1 AND delivery_state IN ('queued', 'sending', 'retry_wait') AND delivery_id > COALESCE((SELECT acked.delivery_id FROM webhook_deliveries AS acked INNER JOIN address_totals ON address_totals.address_id = acked.address_id AND address_totals.last_notified_event_id = acked.event_id WHERE acked.address_id = ?1), 0) ORDER BY delivery_id DESC LIMIT 1",
+                    "SELECT total_received_zat, received_by_confirmations FROM webhook_deliveries WHERE address_id = ?1 AND delivery_state IN ('queued', 'sending', 'retry_wait') AND delivery_id > COALESCE((SELECT acked.delivery_id FROM webhook_deliveries AS acked INNER JOIN address_totals ON address_totals.address_id = acked.address_id AND address_totals.last_notified_event_id = acked.event_id WHERE acked.address_id = ?1), 0) ORDER BY delivery_id DESC LIMIT 1",
                     params![address_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
-            if current_total_zat == outstanding_total_zat.unwrap_or(last_notified_total_zat) {
-                if outstanding_total_zat.is_none() {
+            let has_outstanding = outstanding.is_some();
+            let current = (current_total_zat, current_by_confirmations);
+            if current
+                == outstanding.unwrap_or((last_notified_total_zat, last_notified_by_confirmations))
+            {
+                if !has_outstanding {
                     tx.execute(
                         "UPDATE address_totals SET dirty_state = 'clean', dirty_reason = NULL, dirty_since_height = NULL WHERE address_id = ?1",
                         params![address_id],
@@ -1355,18 +1423,23 @@ impl AppDb {
                 continue;
             }
 
+            let (current_total_zat, current_by_confirmations) = current;
             let event_id = format!("zcash:{address_id}:v{state_version}");
-            let request_body_json = serde_json::to_string(&json!({
+            let mut body = json!({
                 "event_id": event_id,
                 "payment_source": "zcash",
                 "address": address,
                 "total_received": format_zat_as_zec(current_total_zat),
                 "observed_at": now,
-            }))?;
+            });
+            if let Some(by_confirmations) = decode_zat_array(current_by_confirmations.as_deref()) {
+                body["received_by_confirmations"] = json!(format_zat_array(&by_confirmations));
+            }
+            let request_body_json = serde_json::to_string(&body)?;
 
             tx.execute(
-                "INSERT OR IGNORE INTO webhook_deliveries (address_id, event_id, total_received_zat, observed_at, request_body_json, delivery_state, attempt_count, next_attempt_at, last_http_status, last_response_body, last_attempt_at) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', 0, NULL, NULL, NULL, NULL)",
-                params![address_id, event_id, current_total_zat, now, request_body_json],
+                "INSERT OR IGNORE INTO webhook_deliveries (address_id, event_id, total_received_zat, observed_at, request_body_json, delivery_state, attempt_count, next_attempt_at, last_http_status, last_response_body, last_attempt_at, received_by_confirmations) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', 0, NULL, NULL, NULL, NULL, ?6)",
+                params![address_id, event_id, current_total_zat, now, request_body_json, current_by_confirmations],
             )?;
 
             tx.execute(
@@ -1471,10 +1544,15 @@ impl AppDb {
     ) -> Result<(), AppError> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (address_id, event_id, total_received_zat): (i64, String, i64) = tx.query_row(
-            "SELECT address_id, event_id, total_received_zat FROM webhook_deliveries WHERE delivery_id = ?1",
+        let (address_id, event_id, total_received_zat, by_confirmations): (
+            i64,
+            String,
+            i64,
+            Option<String>,
+        ) = tx.query_row(
+            "SELECT address_id, event_id, total_received_zat, received_by_confirmations FROM webhook_deliveries WHERE delivery_id = ?1",
             params![delivery_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
 
         tx.execute(
@@ -1499,8 +1577,8 @@ impl AppDb {
             return Ok(());
         }
         tx.execute(
-            "UPDATE address_totals SET last_notified_total_zat = ?2, last_notified_event_id = ?3, last_notified_at = ?4, dirty_state = 'dirty', dirty_reason = COALESCE(dirty_reason, 'webhook_acknowledged') WHERE address_id = ?1",
-            params![address_id, total_received_zat, event_id, attempted_at],
+            "UPDATE address_totals SET last_notified_total_zat = ?2, last_notified_event_id = ?3, last_notified_at = ?4, last_notified_by_confirmations = ?5, dirty_state = 'dirty', dirty_reason = COALESCE(dirty_reason, 'webhook_acknowledged') WHERE address_id = ?1",
+            params![address_id, total_received_zat, event_id, attempted_at, by_confirmations],
         )?;
 
         // The address stays dirty here and the helper below decides, against any newer outstanding
@@ -1770,6 +1848,7 @@ impl AppDb {
 
         ensure_address_receipts_recent_mempool_columns(&conn)?;
         ensure_ironwood_pool_support(&mut conn)?;
+        ensure_received_by_confirmations_columns(&conn)?;
 
         Ok(())
     }
@@ -2047,6 +2126,23 @@ fn ensure_address_receipts_recent_mempool_columns(conn: &Connection) -> Result<(
     Ok(())
 }
 
+/// Adds the nullable columns behind `received_by_confirmations`. Existing databases get NULLs,
+/// which mean "not tracked" until `REQUIRED_CONFIRMATIONS` is set.
+fn ensure_received_by_confirmations_columns(conn: &Connection) -> Result<(), AppError> {
+    for (table, column) in [
+        ("service_metadata", "required_confirmations INTEGER"),
+        ("address_totals", "received_by_confirmations TEXT"),
+        ("address_totals", "last_notified_by_confirmations TEXT"),
+        ("webhook_deliveries", "received_by_confirmations TEXT"),
+    ] {
+        let name = column.split(' ').next().unwrap_or(column);
+        if !table_column_exists(conn, table, name)? {
+            conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column}"), [])?;
+        }
+    }
+    Ok(())
+}
+
 fn table_column_exists(
     conn: &Connection,
     table_name: &str,
@@ -2113,11 +2209,13 @@ fn recompute_address_totals(
         0
     };
 
+    let required_confirmations = stored_required_confirmations(tx)?;
+
     for address_id in address_ids {
-        let previous: (i64, i64) = tx.query_row(
-            "SELECT current_total_zat, state_version FROM address_totals WHERE address_id = ?1",
+        let previous: (i64, i64, Option<String>) = tx.query_row(
+            "SELECT current_total_zat, state_version, received_by_confirmations FROM address_totals WHERE address_id = ?1",
             params![address_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
 
         let active_total_zat = query_sum(
@@ -2138,7 +2236,13 @@ fn recompute_address_totals(
             params![address_id, finalized_cutoff_height],
             |row| row.get(0),
         )?;
-        let changed = previous.0 != current_total_zat;
+        let by_confirmations = encode_zat_array(
+            received_by_confirmations_zat(tx, *address_id, tip_height, required_confirmations)?
+                .as_deref(),
+        );
+        // A deeper confirmation is a change too, so every step of the array is reported. Once
+        // every element reaches the top the array stops changing and so do the events.
+        let changed = previous.0 != current_total_zat || previous.2 != by_confirmations;
         let next_state_version = if changed { previous.1 + 1 } else { previous.1 };
         // An unchanged total keeps its existing dirty state: marking it clean here would drop a
         // pending notification (for example one queued after an acknowledgment of an older total).
@@ -2155,7 +2259,7 @@ fn recompute_address_totals(
         };
 
         tx.execute(
-            "UPDATE address_totals SET finalized_through_height = ?2, finalized_total_zat = ?3, recent_total_zat = ?4, current_total_zat = ?5, last_computed_tip_height = ?6, dirty_state = CASE WHEN ?12 THEN ?7 ELSE dirty_state END, dirty_reason = CASE WHEN ?12 THEN ?8 ELSE dirty_reason END, dirty_since_height = CASE WHEN ?12 THEN ?9 ELSE dirty_since_height END, state_version = ?10, last_changed_at = ?11 WHERE address_id = ?1",
+            "UPDATE address_totals SET finalized_through_height = ?2, finalized_total_zat = ?3, recent_total_zat = ?4, current_total_zat = ?5, last_computed_tip_height = ?6, dirty_state = CASE WHEN ?12 THEN ?7 ELSE dirty_state END, dirty_reason = CASE WHEN ?12 THEN ?8 ELSE dirty_reason END, dirty_since_height = CASE WHEN ?12 THEN ?9 ELSE dirty_since_height END, state_version = ?10, last_changed_at = ?11, received_by_confirmations = ?13 WHERE address_id = ?1",
             params![
                 address_id,
                 finalized_through_height,
@@ -2169,6 +2273,7 @@ fn recompute_address_totals(
                 next_state_version,
                 now,
                 changed,
+                by_confirmations,
             ],
         )?;
 
@@ -2185,6 +2290,65 @@ fn recompute_address_totals(
     }
 
     Ok(())
+}
+
+fn stored_required_confirmations(tx: &rusqlite::Transaction<'_>) -> Result<Option<i64>, AppError> {
+    Ok(tx
+        .query_row(
+            "SELECT required_confirmations FROM service_metadata WHERE singleton_id = 1",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// `received_by_confirmations` in zatoshis: element `i` sums the receipts counted in
+/// `total_received` that have at least `i` confirmations at `tip_height`. Element 0 therefore
+/// equals `total_received`, including provisional mempool receipts. `None` when not tracked.
+fn received_by_confirmations_zat(
+    tx: &rusqlite::Transaction<'_>,
+    address_id: i64,
+    tip_height: i64,
+    required_confirmations: Option<i64>,
+) -> Result<Option<Vec<i64>>, AppError> {
+    let Some(required) = required_confirmations else {
+        return Ok(None);
+    };
+    let required = usize::try_from(required.max(0)).unwrap_or(0);
+    let mut by_depth = vec![0_i64; required + 1];
+    let mut statement = tx.prepare(
+        "SELECT CASE WHEN receipt_kind = 'mined' AND ?2 >= mined_height THEN ?2 - mined_height + 1 ELSE 0 END, value_zat FROM address_receipts_recent WHERE address_id = ?1 AND receipt_state = 'active' AND eligible_for_webhook = 1",
+    )?;
+    let rows = statement.query_map(params![address_id, tip_height], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for row in rows {
+        let (depth, value_zat) = row?;
+        let reached = usize::try_from(depth.max(0))
+            .unwrap_or(usize::MAX)
+            .min(required);
+        for slot in by_depth.iter_mut().take(reached + 1) {
+            *slot += value_zat;
+        }
+    }
+    Ok(Some(by_depth))
+}
+
+fn encode_zat_array(values: Option<&[i64]>) -> Option<String> {
+    values.map(|values| {
+        let parts = values.iter().map(i64::to_string).collect::<Vec<_>>();
+        format!("[{}]", parts.join(","))
+    })
+}
+
+fn decode_zat_array(value: Option<&str>) -> Option<Vec<i64>> {
+    value.and_then(|value| serde_json::from_str::<Vec<i64>>(value).ok())
+}
+
+/// ZEC strings for each element, in the same format as `total_received`.
+pub fn format_zat_array(values: &[i64]) -> Vec<String> {
+    values.iter().copied().map(format_zat_as_zec).collect()
 }
 
 fn fingerprint(value: &str) -> String {
@@ -2296,6 +2460,7 @@ mod tests {
             finality_confirmations: 100,
             public_base_url: None,
             dev_simulated_payments: false,
+            required_confirmations: None,
             return_url_allowed_origins: Vec::new(),
         }
     }
@@ -4491,5 +4656,356 @@ mod tests {
             )
             .unwrap();
         assert_eq!(affected, vec![1]);
+    }
+
+    fn depth_test_db(temp: &std::path::Path, required_confirmations: u32) -> (AppDb, i64) {
+        let db = AppDb::open(temp.join("app.db")).unwrap();
+        let mut config = test_config(temp, None);
+        config.webhook_report_confirmations = 0;
+        config.required_confirmations = Some(required_confirmations);
+        db.ensure_service_metadata(&config).unwrap();
+        let record = db
+            .insert_issued_address(NewIssuedAddress {
+                unified_address: "uaddr1depth",
+                address_source: "fresh",
+                diversifier_index_be: None,
+                diversifier_bytes: None,
+                request_label: None,
+                request_memo: None,
+                request_message: None,
+                requested_amount: None,
+            })
+            .unwrap();
+        (db, record.address_id)
+    }
+
+    fn by_confirmations(temp: &std::path::Path, address_id: i64) -> Option<String> {
+        rusqlite::Connection::open(temp.join("app.db"))
+            .unwrap()
+            .query_row(
+                "SELECT received_by_confirmations FROM address_totals WHERE address_id = ?1",
+                rusqlite::params![address_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// Queues and acknowledges the pending webhook, returning its `received_by_confirmations`,
+    /// or `None` when nothing was queued.
+    fn deliver(db: &AppDb, address_id: i64) -> Option<Vec<String>> {
+        db.queue_webhook_deliveries_for_dirty_addresses(&[address_id])
+            .unwrap();
+        let delivery = db
+            .claim_ready_webhook_delivery("2099-01-01T00:00:00Z")
+            .unwrap()?;
+        db.record_webhook_delivery_success(
+            delivery.delivery_id,
+            "2099-01-01T00:00:00Z",
+            200,
+            "",
+            1,
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&delivery.request_body_json).unwrap();
+        Some(
+            body["received_by_confirmations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_str().unwrap().to_owned())
+                .collect(),
+        )
+    }
+
+    fn zec(values: &[&str]) -> Option<Vec<String>> {
+        Some(values.iter().map(|value| (*value).to_owned()).collect())
+    }
+
+    #[test]
+    fn received_by_confirmations_deepens_block_by_block_then_goes_quiet() {
+        let temp = tempdir().unwrap();
+        let (db, address_id) = depth_test_db(temp.path(), 3);
+        let txids = std::collections::BTreeSet::from(["tx-depth".to_string()]);
+        db.reconcile_mempool_snapshot(
+            &txids,
+            &[mempool_receipt(
+                address_id,
+                "tx-depth",
+                "orchard",
+                "tx-depth:orchard:0",
+                10_000_000,
+                "2099-01-01T00:00:00Z",
+            )],
+            "2099-01-01T00:00:00Z",
+            1000,
+            100,
+            0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            by_confirmations(temp.path(), address_id).as_deref(),
+            Some("[10000000,0,0,0]")
+        );
+        assert_eq!(
+            deliver(&db, address_id),
+            zec(&["0.10000000", "0.00000000", "0.00000000", "0.00000000"])
+        );
+
+        // Mined in block 1001: one confirmation.
+        let mut mined = mined_receipt(
+            address_id,
+            "tx-depth",
+            "orchard",
+            "tx-depth:orchard:0",
+            10_000_000,
+            1001,
+            1,
+            true,
+        );
+        mined.first_observed_at = "2099-01-01T00:00:00Z".into();
+        db.apply_attributed_receipts(&[mined], 1001, 100).unwrap();
+        assert_eq!(
+            deliver(&db, address_id),
+            zec(&["0.10000000", "0.10000000", "0.00000000", "0.00000000"])
+        );
+
+        db.advance_receipt_maturity(1002, 0, 100).unwrap();
+        assert_eq!(
+            deliver(&db, address_id),
+            zec(&["0.10000000", "0.10000000", "0.10000000", "0.00000000"])
+        );
+        db.advance_receipt_maturity(1003, 0, 100).unwrap();
+        assert_eq!(
+            deliver(&db, address_id),
+            zec(&["0.10000000", "0.10000000", "0.10000000", "0.10000000"])
+        );
+
+        // Every element reached the top: later blocks send nothing.
+        for tip in 1004..1010 {
+            db.advance_receipt_maturity(tip, 0, 100).unwrap();
+            assert_eq!(deliver(&db, address_id), None, "tip {tip}");
+        }
+    }
+
+    #[test]
+    fn a_reorg_lowers_only_the_depths_it_undid() {
+        let temp = tempdir().unwrap();
+        let (db, address_id) = depth_test_db(temp.path(), 3);
+        db.apply_attributed_receipts(
+            &[
+                mined_receipt(
+                    address_id,
+                    "tx-old",
+                    "orchard",
+                    "tx-old:orchard:0",
+                    5,
+                    990,
+                    11,
+                    true,
+                ),
+                mined_receipt(
+                    address_id,
+                    "tx-new",
+                    "orchard",
+                    "tx-new:orchard:0",
+                    7,
+                    1000,
+                    1,
+                    true,
+                ),
+            ],
+            1000,
+            100,
+        )
+        .unwrap();
+        db.advance_receipt_maturity(1003, 0, 100).unwrap();
+        assert_eq!(
+            deliver(&db, address_id),
+            zec(&["0.00000012", "0.00000012", "0.00000012", "0.00000012"])
+        );
+
+        // Blocks 1000..=1003 are replaced; tx-new is gone from the new chain at tip 999.
+        db.revoke_mined_receipts_above_tip(999, 100).unwrap();
+        assert_eq!(
+            by_confirmations(temp.path(), address_id).as_deref(),
+            Some("[5,5,5,5]")
+        );
+        assert_eq!(
+            deliver(&db, address_id),
+            zec(&["0.00000005", "0.00000005", "0.00000005", "0.00000005"])
+        );
+
+        // tx-new is mined again in block 1001 of the new chain.
+        db.apply_attributed_receipts(
+            &[mined_receipt(
+                address_id,
+                "tx-new",
+                "orchard",
+                "tx-new:orchard:0",
+                7,
+                1001,
+                1,
+                true,
+            )],
+            1001,
+            100,
+        )
+        .unwrap();
+        assert_eq!(
+            deliver(&db, address_id),
+            zec(&["0.00000012", "0.00000012", "0.00000005", "0.00000005"])
+        );
+    }
+
+    #[test]
+    fn mempool_expiry_lowers_received_by_confirmations() {
+        let temp = tempdir().unwrap();
+        let (db, address_id) = depth_test_db(temp.path(), 2);
+        let txids = std::collections::BTreeSet::from(["tx-expire".to_string()]);
+        db.reconcile_mempool_snapshot(
+            &txids,
+            &[mempool_receipt(
+                address_id,
+                "tx-expire",
+                "orchard",
+                "tx-expire:orchard:0",
+                42,
+                "2026-01-01T00:00:00Z",
+            )],
+            "2026-01-01T00:00:00Z",
+            1000,
+            100,
+            0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            deliver(&db, address_id),
+            zec(&["0.00000042", "0.00000000", "0.00000000"])
+        );
+        db.reconcile_mempool_snapshot(&txids, &[], "2026-01-02T01:00:00Z", 1000, 100, 0, true)
+            .unwrap();
+        assert_eq!(
+            deliver(&db, address_id),
+            zec(&["0.00000000", "0.00000000", "0.00000000"])
+        );
+
+        // Dropped from the mempool without being mined: revoked, and nothing changes again.
+        let txids = std::collections::BTreeSet::from(["tx-drop".to_string()]);
+        db.reconcile_mempool_snapshot(
+            &txids,
+            &[mempool_receipt(
+                address_id,
+                "tx-drop",
+                "orchard",
+                "tx-drop:orchard:0",
+                9,
+                "2026-01-02T01:00:00Z",
+            )],
+            "2026-01-02T01:00:00Z",
+            1000,
+            100,
+            0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            deliver(&db, address_id),
+            zec(&["0.00000009", "0.00000000", "0.00000000"])
+        );
+        db.reconcile_mempool_snapshot(
+            &Default::default(),
+            &[],
+            "2026-01-02T01:01:00Z",
+            1001,
+            100,
+            0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            deliver(&db, address_id),
+            zec(&["0.00000000", "0.00000000", "0.00000000"])
+        );
+    }
+
+    #[test]
+    fn changing_required_confirmations_rebuilds_arrays_without_new_events() {
+        let temp = tempdir().unwrap();
+        let (db, address_id) = depth_test_db(temp.path(), 3);
+        db.apply_attributed_receipts(
+            &[mined_receipt(
+                address_id,
+                "tx-a",
+                "orchard",
+                "tx-a:orchard:0",
+                5,
+                1000,
+                1,
+                true,
+            )],
+            1001,
+            100,
+        )
+        .unwrap();
+        assert_eq!(
+            deliver(&db, address_id),
+            zec(&["0.00000005", "0.00000005", "0.00000005", "0.00000000"])
+        );
+
+        db.apply_required_confirmations(Some(1)).unwrap();
+        assert_eq!(
+            by_confirmations(temp.path(), address_id).as_deref(),
+            Some("[5,5]")
+        );
+        assert_eq!(deliver(&db, address_id), None);
+
+        db.apply_required_confirmations(None).unwrap();
+        assert_eq!(by_confirmations(temp.path(), address_id), None);
+    }
+
+    #[test]
+    fn no_array_is_tracked_or_sent_without_required_confirmations() {
+        let temp = tempdir().unwrap();
+        let db = AppDb::open(temp.path().join("app.db")).unwrap();
+        db.ensure_service_metadata(&test_config(temp.path(), None))
+            .unwrap();
+        let record = db
+            .insert_issued_address(NewIssuedAddress {
+                unified_address: "uaddr1no-depth",
+                address_source: "fresh",
+                diversifier_index_be: None,
+                diversifier_bytes: None,
+                request_label: None,
+                request_memo: None,
+                request_message: None,
+                requested_amount: None,
+            })
+            .unwrap();
+        db.apply_attributed_receipts(
+            &[mined_receipt(
+                record.address_id,
+                "tx-b",
+                "orchard",
+                "tx-b:orchard:0",
+                5,
+                1000,
+                1,
+                true,
+            )],
+            1000,
+            100,
+        )
+        .unwrap();
+        db.queue_webhook_deliveries_for_dirty_addresses(&[record.address_id])
+            .unwrap();
+        let delivery = db
+            .claim_ready_webhook_delivery("2099-01-01T00:00:00Z")
+            .unwrap()
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_str(&delivery.request_body_json).unwrap();
+        assert!(body.get("received_by_confirmations").is_none());
+        assert_eq!(body["total_received"], "0.00000005");
     }
 }

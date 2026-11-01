@@ -56,6 +56,8 @@ const svg = await QRCode.toString(session.qr_text, { type: "svg" });
 
 ## Verify a webhook
 
+When the service sets `REQUIRED_CONFIRMATIONS`, both the observation and `getPayment` carry `received_by_confirmations` (see [Waiting for confirmations](integration.md#waiting-for-confirmations)). `receivedWithConfirmations(observation, n)` returns the amount with at least `n` confirmations, or `total_received` when the field is absent.
+
 `verifyWebhook(rawBody, signature)` does three things:
 
 1. It checks `X-Signature` against the raw body in constant time.
