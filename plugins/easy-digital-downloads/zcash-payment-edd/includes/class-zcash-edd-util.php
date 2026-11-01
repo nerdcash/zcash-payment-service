@@ -119,7 +119,7 @@ final class Zcash_EDD_Util {
 	 * @return array{event_id:string,address:string,total_received:string,total_zat:int,settled_zat:int,state_version:int}|null
 	 */
 	public static function parse_observation( string $raw_body ): ?array {
-		$data = json_decode( $raw_body, true );
+		$data = self::decode_json( $raw_body );
 		if ( ! is_array( $data ) ) {
 			return null;
 		}
@@ -150,6 +150,23 @@ final class Zcash_EDD_Util {
 			'settled_zat'    => $settled_zat,
 			'state_version'  => (int) $m[1],
 		);
+	}
+
+	/**
+	 * Decodes a JSON object from the service into an array, or null. Associative decoding turns
+	 * a numeric-keyed object into a PHP list, so `received_by_confirmations` is checked against
+	 * an object decode to make sure it really is a JSON array.
+	 */
+	public static function decode_json( string $raw ): ?array {
+		$data   = json_decode( $raw, true );
+		$object = json_decode( $raw );
+		if ( ! is_array( $data ) || ! $object instanceof stdClass ) {
+			return null;
+		}
+		if ( property_exists( $object, 'received_by_confirmations' ) && ! is_array( $object->received_by_confirmations ) ) {
+			return null;
+		}
+		return $data;
 	}
 
 	/**

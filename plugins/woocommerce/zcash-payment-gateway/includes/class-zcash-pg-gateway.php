@@ -329,7 +329,7 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 		if ( is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response ) ) {
 			return null;
 		}
-		$body = json_decode( (string) wp_remote_retrieve_body( $response ), true );
+		$body = Zcash_PG_Util::decode_json( (string) wp_remote_retrieve_body( $response ) );
 		// Only trust the service's view for this order's own address.
 		return is_array( $body ) && hash_equals( (string) $order->get_meta( self::META_ADDRESS ), (string) ( $body['address'] ?? '' ) ) ? $body : null;
 	}
