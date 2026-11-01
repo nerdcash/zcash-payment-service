@@ -149,7 +149,11 @@ export class ZcashPaymentProviderService extends AbstractPaymentProvider<ZcashOp
     return { data: await this.createSession(input.amount, input.currency_code, input.data) }
   }
 
-  /** Maps the service's live total to a session status. */
+  /**
+   * Maps the service's live total to a session status. Authorization follows everything received,
+   * mempool included, so checkout can finish while the payment confirms; the webhook captures only
+   * once the service's REQUIRED_CONFIRMATIONS are reached.
+   */
   private async liveStatus(data: ZcashSessionData): Promise<PaymentSessionStatus> {
     const live = await this.client_.status(data.payment_id, data.address)
     if (!live) {

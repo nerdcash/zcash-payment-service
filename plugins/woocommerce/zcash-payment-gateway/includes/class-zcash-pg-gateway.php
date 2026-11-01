@@ -15,6 +15,8 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 	const META_QR_TEXT        = '_zcash_qr_text';
 	const META_AMOUNT_ZAT     = '_zcash_amount_zat';
 	const META_RECEIVED_ZAT   = '_zcash_received_zat';
+	// Everything seen so far, mempool included; META_RECEIVED_ZAT is the confirmed part.
+	const META_SEEN_ZAT       = '_zcash_seen_zat';
 	const META_STATE_VERSION  = '_zcash_state_version';
 	const META_PRICED         = '_zcash_priced_total';
 	const META_NEEDS_REVIEW   = '_zcash_needs_review';

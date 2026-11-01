@@ -112,7 +112,11 @@ final class Zcash_EDD_Util {
 	/**
 	 * Validates a webhook body and returns its fields, or null.
 	 *
-	 * @return array{event_id:string,address:string,total_received:string,total_zat:int,state_version:int}|null
+	 * `total_zat` is everything received, mempool included. `settled_zat` is what has the
+	 * service's `REQUIRED_CONFIRMATIONS`: the last `received_by_confirmations` element, or
+	 * `total_zat` when the service doesn't send that array.
+	 *
+	 * @return array{event_id:string,address:string,total_received:string,total_zat:int,settled_zat:int,state_version:int}|null
 	 */
 	public static function parse_observation( string $raw_body ): ?array {
 		$data = json_decode( $raw_body, true );
@@ -134,13 +138,42 @@ final class Zcash_EDD_Util {
 		if ( null === $total_zat ) {
 			return null;
 		}
+		$settled_zat = self::settled_zat( $data, $total_zat );
+		if ( null === $settled_zat ) {
+			return null;
+		}
 		return array(
 			'event_id'       => $data['event_id'],
 			'address'        => $data['address'],
 			'total_received' => $data['total_received'],
 			'total_zat'      => $total_zat,
+			'settled_zat'    => $settled_zat,
 			'state_version'  => (int) $m[1],
 		);
+	}
+
+	/**
+	 * The amount with the service's required confirmations: the last element of
+	 * `received_by_confirmations` when present, else `$total_zat`. Null when the array is
+	 * malformed. Works on webhook bodies and on the status route's JSON.
+	 */
+	public static function settled_zat( array $data, int $total_zat ): ?int {
+		if ( ! array_key_exists( 'received_by_confirmations', $data ) ) {
+			return $total_zat;
+		}
+		$depths = $data['received_by_confirmations'];
+		if ( ! is_array( $depths ) || array() === $depths || count( $depths ) > 101 || ! array_is_list( $depths ) ) {
+			return null;
+		}
+		$settled = null;
+		foreach ( $depths as $depth ) {
+			$zat = is_string( $depth ) ? self::zec_to_zat( $depth ) : null;
+			if ( null === $zat ) {
+				return null;
+			}
+			$settled = $zat;
+		}
+		return $settled;
 	}
 
 	/** Takes a MySQL named lock, waiting up to 10 seconds. */

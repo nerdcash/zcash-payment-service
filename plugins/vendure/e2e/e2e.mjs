@@ -239,6 +239,40 @@ try {
   assert.notEqual(settleFlagged.settlePayment.__typename, 'Payment', JSON.stringify(settleFlagged));
   assert.equal(settled(await getOrder(lateOrder.id)), 0);
 
+  console.log('--- a payment settles only once it has REQUIRED_CONFIRMATIONS');
+  const conf = await checkout();
+  const confOrder = await orderByAddress(conf.address);
+  const txid = 'ef'.repeat(32);
+  const simulateDepth = async (confirmations) => {
+    const r = await fetch(`${serviceUrl}/dev/simulate-payment`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ address: conf.address, amount: '0.5', txid, confirmations }),
+    });
+    assert.equal(r.status, 200, `simulate-payment: ${await r.text()}`);
+  };
+  await simulateDepth(0);
+  let pending = await until('pending-confirmation note', async () => {
+    const o = await getOrder(confOrder.id);
+    return notes(o).some((n) => /pending confirmation/.test(n)) ? o : null;
+  });
+  assert.equal(settled(pending), 0, 'settled from the mempool');
+  const settleEarly = await admin(
+    'mutation($id: ID!) { settlePayment(id: $id) { __typename ... on ErrorResult { message } ... on SettlePaymentError { paymentErrorMessage } } }',
+    { id: pending.payments[0].id }
+  );
+  assert.equal(settleEarly.settlePayment.__typename, 'SettlePaymentError', JSON.stringify(settleEarly));
+  await simulateDepth(1);
+  // Give the webhook time to be delivered and applied.
+  await new Promise((r) => setTimeout(r, 6000));
+  pending = await getOrder(confOrder.id);
+  assert.equal(settled(pending), 0, 'settled at 1 of 2 confirmations');
+  await simulateDepth(2);
+  await until('settlement at 2 confirmations', async () => {
+    const o = await getOrder(confOrder.id);
+    return settled(o) === 1 ? o : null;
+  });
+
   console.log('--- webhook rejects a bad signature');
   const body = observation(address, 200, '9');
   assert.equal((await webhook(body, '00')).status, 401);

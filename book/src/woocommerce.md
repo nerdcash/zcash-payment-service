@@ -12,6 +12,7 @@
 
 Edge cases the plugin handles:
 
+- **Waiting for confirmations.** When the service sets [`REQUIRED_CONFIRMATIONS`](integration.md#waiting-for-confirmations), the plugin completes the order only once the last `received_by_confirmations` element covers it. A payment seen in the mempool, or with fewer confirmations, adds a *pending confirmation* order note and leaves the order **Pending payment**; a reorg that undoes those confirmations on a paid order puts it **On hold**. When the service doesn't set `REQUIRED_CONFIRMATIONS`, the array is absent and the plugin uses `total_received` as before.
 - **Paying again later** reuses the order's existing address, so a payment to the address the customer already saw still counts. If the order total changed since, it gets a new address, unless money already arrived; then checkout stops and an order note asks you to reconcile by hand.
 - **Funds drop after payment** (an unconfirmed transaction expires, or a reorg): the order goes **On hold** with a note.
 - **Payment for a cancelled, failed, or refunded order** is never completed automatically, since its stock may be gone. The plugin adds a note for you to review.
@@ -71,13 +72,14 @@ The service runs on testnet with `ZCASH_DEV_SIMULATED_PAYMENTS=true`, which turn
 - places an order and checks that the browser lands on the pay page with the right amount and a QR code;
 - simulates a partial payment and checks the pay page shows it, then simulates the rest;
 - checks that the browser returns to the order-received page and that the order is **Processing** with the full amount recorded;
+- simulates one payment at 0, 1, and 2 confirmations (the stack sets `REQUIRED_CONFIRMATIONS=2`) and checks the order stays **Pending payment** with a *pending confirmation* note until the last;
 - checks that the webhook route rejects a bad signature with `401` and acknowledges a signed event for an unknown address.
 
 CI runs both on every pull request (`.github/workflows/woocommerce-plugin.yml`) and keeps screenshots of each step as a build artifact.
 
 ### What the tests do not cover
 
-- **The chain.** Simulated payments skip lightwalletd, trial decryption, and confirmations. The service's own test suite covers scanning; a real testnet payment is still worth doing by hand before a release.
+- **The chain.** Simulated payments skip lightwalletd and trial decryption, and their confirmations are simulated rather than mined. The service's own test suite covers scanning; a real testnet payment is still worth doing by hand before a release.
 - **Wallet apps.** Nobody scans the QR code or opens the `zcash:` link in a real wallet.
 - **Other setups.** Only one WooCommerce version, the default theme, and the block checkout are exercised. The classic checkout, other themes, and other plugins that change checkout are not.
 - **Non-ZEC pricing.** The manual exchange rate path has unit tests but no end-to-end run.

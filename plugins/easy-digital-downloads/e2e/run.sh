@@ -67,6 +67,40 @@ echo "$late_notes" | grep -q "under manual review" || { echo "no late-payment no
 [ "$(wp eval "echo edd_get_order_meta($late_id, '_zcash_needs_review', true);")" = 1 ] || { echo "late payment not flagged for review"; exit 1; }
 [ "$(wp eval "echo edd_get_order($late_id)->status;")" = revoked ] || { echo "revoked order was revived"; exit 1; }
 
+echo "--- an order completes only once its payment has REQUIRED_CONFIRMATIONS"
+conf_id="$(wp eval '
+$id = edd_add_order( array( "status" => "pending", "gateway" => "zcash", "currency" => "ZEC", "email" => "conf@example.com", "subtotal" => 0.5, "total" => 0.5 ) );
+edd_add_order_item( array( "order_id" => $id, "product_id" => '"$E2E_DOWNLOAD_ID"', "product_name" => "Test e-book", "status" => "pending", "amount" => 0.5, "subtotal" => 0.5, "total" => 0.5, "quantity" => 1 ) );
+$r = Zcash_EDD_Gateway::start_session( $id );
+if ( is_wp_error( $r ) ) { fwrite( STDERR, $r->get_error_message() ); exit( 1 ); }
+echo $id;
+')"
+conf_address="$(wp eval "echo edd_get_order_meta($conf_id, '_zcash_address', true);")"
+[ -n "$conf_address" ] || { echo "confirmation order has no address"; exit 1; }
+txid="$(printf '12%.0s' $(seq 1 32))"
+simulate_depth() {
+  curl -sf -X POST "$E2E_SERVICE_URL/dev/simulate-payment" -H 'content-type: application/json' \
+    --data "{\"address\":\"$conf_address\",\"amount\":\"0.5\",\"txid\":\"$txid\",\"confirmations\":$1}" >/dev/null
+}
+simulate_depth 0
+for _ in $(seq 1 30); do
+  conf_notes="$(notes "$conf_id")"
+  case "$conf_notes" in *"pending confirmation"*) break ;; esac
+  sleep 2
+done
+echo "$conf_notes" | grep -q "pending confirmation" || { echo "no pending-confirmation note: $conf_notes"; exit 1; }
+[ "$(wp eval "echo edd_get_order($conf_id)->status;")" = pending ] || { echo "order completed from the mempool"; exit 1; }
+simulate_depth 1
+sleep 6
+[ "$(wp eval "echo edd_get_order($conf_id)->status;")" = pending ] || { echo "order completed at 1 of 2 confirmations"; exit 1; }
+simulate_depth 2
+for _ in $(seq 1 30); do
+  conf_status="$(wp eval "echo edd_get_order($conf_id)->status;")"
+  [ "$conf_status" = complete ] && break
+  sleep 2
+done
+[ "$conf_status" = complete ] || { echo "confirmed order not complete: $conf_status"; exit 1; }
+
 echo "--- webhook rejects a bad signature"
 body='{"event_id":"zcash:1:v9","payment_source":"zcash","address":"x","total_received":"9","observed_at":"2026-01-01T00:00:00Z"}'
 code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$WEBHOOK_URL" \

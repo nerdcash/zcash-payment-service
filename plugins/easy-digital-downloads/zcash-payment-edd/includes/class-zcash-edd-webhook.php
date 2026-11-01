@@ -108,7 +108,10 @@ final class Zcash_EDD_Webhook {
 			return new WP_REST_Response( array( 'ok' => true, 'ignored' => 'stale' ), 200 );
 		}
 
-		$total   = $observation['total_zat'];
+		// Decisions use the confirmed amount: everything received when the service doesn't report
+		// confirmation depths, otherwise what has the service's REQUIRED_CONFIRMATIONS.
+		$total   = $observation['settled_zat'];
+		$seen    = $observation['total_zat'];
 		$due     = (int) $g::meta( $order_id, $g::META_AMOUNT_ZAT );
 		$zec     = Zcash_EDD_Util::zat_to_zec( $total );
 		$due_zec = Zcash_EDD_Util::zat_to_zec( $due );
@@ -167,7 +170,8 @@ final class Zcash_EDD_Webhook {
 			// Deliveries can be retried after a newer state was skipped (for example a receipt
 			// that was later dropped). Confirm the service still sees the funds first.
 			$live     = $g::service_status( $order_id );
-			$live_zat = null === $live ? null : Zcash_EDD_Util::zec_to_zat( (string) ( $live['total_received'] ?? '' ) );
+			$live_total = null === $live ? null : Zcash_EDD_Util::zec_to_zat( (string) ( $live['total_received'] ?? '' ) );
+			$live_zat   = null === $live_total ? null : Zcash_EDD_Util::settled_zat( $live, $live_total );
 			if ( null === $live_zat ) {
 				return new WP_REST_Response( array( 'error' => 'cannot confirm with the service, retry' ), 503 );
 			}
@@ -201,13 +205,20 @@ final class Zcash_EDD_Webhook {
 				/* translators: %s: ZEC total */
 				$g::note( $order_id, sprintf( __( 'Zcash funds recovered to %s ZEC. Hold released.', 'zcash-payment-edd' ), $zec ) );
 			}
-		} else {
-			/* translators: 1: received ZEC, 2: due ZEC */
-			$g::note( $order_id, sprintf( __( 'Received %1$s of %2$s ZEC so far.', 'zcash-payment-edd' ), $zec, $due_zec ) );
+		} elseif ( (string) $seen !== $g::meta( $order_id, $g::META_SEEN_ZAT ) ) {
+			// Each new block deepening a payment sends an event; note only a change in the amount.
+			if ( $due > 0 && $seen >= $due ) {
+				/* translators: %s: received ZEC */
+				$g::note( $order_id, sprintf( __( 'Payment of %s ZEC received, pending confirmation. The order completes once it is confirmed.', 'zcash-payment-edd' ), Zcash_EDD_Util::zat_to_zec( $seen ) ) );
+			} else {
+				/* translators: 1: received ZEC, 2: due ZEC */
+				$g::note( $order_id, sprintf( __( 'Received %1$s of %2$s ZEC so far.', 'zcash-payment-edd' ), Zcash_EDD_Util::zat_to_zec( $seen ), $due_zec ) );
+			}
 		}
 
 		// Record the version last, after the transition above succeeded.
 		$g::set_meta( $order_id, $g::META_RECEIVED_ZAT, (string) $total );
+		$g::set_meta( $order_id, $g::META_SEEN_ZAT, (string) $seen );
 		$g::set_meta( $order_id, $g::META_STATE_VERSION, (string) $observation['state_version'] );
 		return new WP_REST_Response( array( 'ok' => true ), 200 );
 	}

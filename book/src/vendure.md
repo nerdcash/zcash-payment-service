@@ -13,6 +13,7 @@ Settling a Zcash payment by hand in the admin runs the same live check, so it is
 
 Edge cases the plugin handles:
 
+- **Waiting for confirmations.** When the service sets [`REQUIRED_CONFIRMATIONS`](integration.md#waiting-for-confirmations), the plugin settles the payment only once the last `received_by_confirmations` element covers it, and an administrator's *settle* is refused until then. A payment seen in the mempool, or with fewer confirmations, adds a *pending confirmation* order note; a reorg that undoes those confirmations after settlement holds the order. When the service doesn't set `REQUIRED_CONFIRMATIONS`, the array is absent and the plugin uses `total_received` as before.
 - **Funds drop after settlement** (an unconfirmed transaction expires, or a reorg): the plugin puts the order on hold. It adds a private history note and publishes a `ZcashPaymentHoldEvent`. While held, fulfillments can't be created, shipped, or delivered, and the order can't move to a shipped or delivered state. When the funds return and the service confirms the full total, the hold is released. **Releasing a hold never settles again or re-runs order placement or fulfillment.**
 - **A payment's amount is fixed once its address is issued.** If the order changes, add a new payment; the old address is not reused or re-priced.
 - **Payment for a cancelled order** is never settled. The plugin adds a history note and publishes a `ZcashPaymentReviewEvent` so you can refund it. If a cancellation lands while a settlement is in flight, the order is flagged the same way.
@@ -85,10 +86,11 @@ The service runs on testnet with `ZCASH_DEV_SIMULATED_PAYMENTS=true`, which turn
 - sends signed webhooks for a drop in funds (the order is held and a fulfillment is refused), a stale event (ignored), and the recovery (the hold is released with no second settlement, and a fulfillment then succeeds once);
 - checks that an administrator can't settle an unpaid Zcash payment;
 - pays a cancelled order and checks it is flagged for review, not settled;
+- simulates one payment at 0, 1, and 2 confirmations (the stack sets `REQUIRED_CONFIRMATIONS=2`) and checks it is settled only at the last, with an administrator's *settle* refused before then;
 - checks that the webhook rejects a bad signature with `401`, acknowledges an unknown address, and that the service refuses a foreign `return_url`.
 
 CI runs both on every pull request (`.github/workflows/vendure-plugin.yml`) and keeps screenshots, including the admin order page, as a build artifact.
 
 ### What the tests do not cover
 
-- **The chain.** Simulated payments skip lightwalletd, trial decryption, and confirmations. A real testnet payment is still worth doing by hand before a release.
+- **The chain.** Simulated payments skip lightwalletd and trial decryption, and their confirmations are simulated rather than mined. A real testnet payment is still worth doing by hand before a release.

@@ -176,6 +176,41 @@ try {
   assert.notEqual(lateOrder.payment_status, 'captured');
   assert.equal(captures(lateOrder), 0);
 
+  console.log('--- a payment is captured only once it has REQUIRED_CONFIRMATIONS');
+  await page.goto(`${storeUrl}/demo-store`);
+  await page.getByRole('button', { name: 'Place order' }).click();
+  await page.waitForURL(`${serviceUrl}/pay/**`);
+  const confPaymentId = new URL(page.url()).pathname.split('/').pop();
+  const conf = await (await fetch(`${serviceUrl}/payments/${confPaymentId}`)).json();
+  const { orders: confOrders } = await admin(`/admin/orders?fields=id,created_at&order=-created_at&limit=1`);
+  const confId = confOrders[0].id;
+  assert.equal(sessionOf(await getOrder(confId)).data.address, conf.address);
+  const txid = 'cd'.repeat(32);
+  const simulateDepth = async (confirmations) => {
+    const r = await fetch(`${serviceUrl}/dev/simulate-payment`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ address: conf.address, amount: '0.5', txid, confirmations }),
+    });
+    assert.equal(r.status, 200, `simulate-payment: ${await r.text()}`);
+    const depths = (await (await fetch(`${serviceUrl}/payments/${confPaymentId}`)).json()).received_by_confirmations;
+    assert.equal(depths.length, 3, `received_by_confirmations ${JSON.stringify(depths)}`);
+    // Give the webhook time to be delivered and applied.
+    await new Promise((r) => setTimeout(r, 6000));
+  };
+  for (const depth of [0, 1]) {
+    await simulateDepth(depth);
+    const pending = await getOrder(confId);
+    assert.notEqual(pending.payment_status, 'captured', `captured at ${depth} of 2 confirmations`);
+    assert.equal(captures(pending), 0);
+  }
+  await simulateDepth(2);
+  const confirmed = await until('capture at 2 confirmations', async () => {
+    const o = await getOrder(confId);
+    return o.payment_status === 'captured' ? o : null;
+  });
+  assert.equal(captures(confirmed), 1);
+
   console.log('--- webhook rejects a bad signature');
   const body = observation(address, 200, '9');
   assert.equal((await webhook(body, '00')).status, 401);

@@ -67,6 +67,42 @@ echo "$notes" | grep -q "under manual review" || { echo "no late-payment note: $
 [ "$(wp eval "echo wc_get_order($late_id)->get_meta('_zcash_needs_review');")" = 1 ] || { echo "late payment not flagged for review"; exit 1; }
 [ "$(wp eval "echo wc_get_order($late_id)->get_status();")" = cancelled ] || { echo "cancelled order was revived"; exit 1; }
 
+echo "--- an order completes only once its payment has REQUIRED_CONFIRMATIONS"
+conf_id="$(wp eval '
+$o = wc_create_order();
+$o->add_product( wc_get_product( '"$E2E_PRODUCT_ID"' ), 1 );
+$o->set_payment_method( "zcash_payment" );
+$o->calculate_totals();
+$o->save();
+$r = WC()->payment_gateways()->payment_gateways()["zcash_payment"]->process_payment( $o->get_id() );
+if ( "success" !== $r["result"] ) { exit( 1 ); }
+echo $o->get_id();
+')"
+conf_address="$(wp eval "echo wc_get_order($conf_id)->get_meta('_zcash_address');")"
+txid="$(printf 'ab%.0s' $(seq 1 32))"
+simulate_depth() {
+  curl -sf -X POST "$E2E_SERVICE_URL/dev/simulate-payment" -H 'content-type: application/json' \
+    --data "{\"address\":\"$conf_address\",\"amount\":\"0.5\",\"txid\":\"$txid\",\"confirmations\":$1}" >/dev/null
+}
+simulate_depth 0
+for _ in $(seq 1 30); do
+  notes="$(wp eval "foreach (wc_get_order_notes(['order_id' => $conf_id]) as \$n) echo \$n->content, PHP_EOL;")"
+  case "$notes" in *"pending confirmation"*) break ;; esac
+  sleep 2
+done
+echo "$notes" | grep -q "pending confirmation" || { echo "no pending-confirmation note: $notes"; exit 1; }
+[ "$(wp eval "echo wc_get_order($conf_id)->get_status();")" = pending ] || { echo "order completed from the mempool"; exit 1; }
+simulate_depth 1
+sleep 6
+[ "$(wp eval "echo wc_get_order($conf_id)->get_status();")" = pending ] || { echo "order completed at 1 of 2 confirmations"; exit 1; }
+simulate_depth 2
+for _ in $(seq 1 30); do
+  conf_status="$(wp eval "echo wc_get_order($conf_id)->get_status();")"
+  case "$conf_status" in processing|completed) break ;; esac
+  sleep 2
+done
+case "$conf_status" in processing|completed) ;; *) echo "confirmed order not paid: $conf_status"; exit 1 ;; esac
+
 echo "--- webhook rejects a bad signature"
 body='{"event_id":"zcash:1:v9","payment_source":"zcash","address":"x","total_received":"9","observed_at":"2026-01-01T00:00:00Z"}'
 code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$E2E_WP_URL/?rest_route=/zcash-payment/v1/webhook" \

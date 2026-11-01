@@ -59,9 +59,16 @@ check(
 		'address'        => 'utest1abc',
 		'total_received' => '0.50000000',
 		'total_zat'      => 50000000,
+		'settled_zat'    => 50000000,
 		'state_version'  => 3,
 	)
 );
+$deep = str_replace( '"observed_at"', '"received_by_confirmations":["0.50000000","0.50000000","0.20000000"],"observed_at"', $body );
+check( 'parse settled from depths', Zcash_EDD_Util::parse_observation( $deep )['settled_zat'] ?? null, 20000000 );
+check( 'parse seen with depths', Zcash_EDD_Util::parse_observation( $deep )['total_zat'] ?? null, 50000000 );
+check( 'parse bad depths', Zcash_EDD_Util::parse_observation( str_replace( '"0.20000000"]', '2]', $deep ) ), null );
+check( 'parse empty depths', Zcash_EDD_Util::parse_observation( str_replace( '"observed_at"', '"received_by_confirmations":[],"observed_at"', $body ) ), null );
+check( 'settled status fallback', Zcash_EDD_Util::settled_zat( array( 'total_received' => '1' ), 7 ), 7 );
 check( 'parse wrong source', Zcash_EDD_Util::parse_observation( str_replace( '"zcash"', '"btc"', $body ) ), null );
 check( 'parse no version', Zcash_EDD_Util::parse_observation( str_replace( ':v3', '', $body ) ), null );
 check( 'parse not json', Zcash_EDD_Util::parse_observation( 'nope' ), null );
