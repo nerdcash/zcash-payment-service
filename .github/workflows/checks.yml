@@ -80,6 +80,10 @@ jobs:
     name: Easy Digital Downloads plugin
     uses: ./.github/workflows/edd-plugin.yml
 
+  prestashop:
+    name: PrestaShop plugin
+    uses: ./.github/workflows/prestashop-plugin.yml
+
   pages:
     name: Pages
     uses: ./.github/workflows/pages.yml
@@ -92,7 +96,7 @@ jobs:
   required:
     name: All required checks
     if: always()
-    needs: [changes, ci, node-client, medusa, vendure, woocommerce, edd, pages]
+    needs: [changes, ci, node-client, medusa, vendure, woocommerce, edd, prestashop, pages]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

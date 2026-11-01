@@ -41,6 +41,7 @@ These plugins connect a store to your own copy of the service:
 
 - **WooCommerce**: [`plugins/woocommerce`](plugins/woocommerce) ([docs](https://nerdcash.github.io/zcash-payment-service/woocommerce.html))
 - **Easy Digital Downloads**: [`plugins/easy-digital-downloads`](plugins/easy-digital-downloads) ([docs](https://nerdcash.github.io/zcash-payment-service/easy-digital-downloads.html))
+- **PrestaShop**: [`plugins/prestashop`](plugins/prestashop) ([docs](https://nerdcash.github.io/zcash-payment-service/prestashop.html))
 - **Medusa**: [`plugins/medusa`](plugins/medusa) ([docs](https://nerdcash.github.io/zcash-payment-service/medusa.html))
 - **Vendure**: [`plugins/vendure`](plugins/vendure) ([docs](https://nerdcash.github.io/zcash-payment-service/vendure.html))
 
