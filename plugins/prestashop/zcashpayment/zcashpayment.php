@@ -663,7 +663,8 @@ class ZcashPayment extends PaymentModule {
 		if ( null === $response || 200 !== $response['status'] ) {
 			return null;
 		}
-		$body = json_decode( $response['body'], true );
+		// Decoded like webhook bodies, so an object-shaped depth array is rejected here too.
+		$body = ZcashPaymentBalance::decode( $response['body'] );
 		// Only trust the service's view for this order's own address.
 		return is_array( $body ) && hash_equals( $row['address'], (string) ( $body['address'] ?? '' ) ) ? $body : null;
 	}

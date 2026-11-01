@@ -31,6 +31,8 @@ final class ZcashPaymentOrder {
 	);
 
 	public static function install(): bool {
+		// uninstall() keeps the table, so a reinstall may find one from an earlier version:
+		// migrate it as well.
 		return Db::getInstance()->execute(
 			'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . self::TABLE . '` (
 				`id_order` INT UNSIGNED NOT NULL PRIMARY KEY,
@@ -48,7 +50,7 @@ final class ZcashPaymentOrder {
 				`pre_hold_state` INT UNSIGNED NOT NULL DEFAULT 0,
 				KEY `address` (`address`(191))
 			) ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8mb4'
-		);
+		) && self::upgrade();
 	}
 
 	/** Adds the columns later versions introduced to a table created by an earlier one. */
