@@ -1,0 +1,5 @@
+node_modules
+.medusa
+e2e/node_modules
+e2e/app/node_modules
+e2e/app/.medusa

@@ -1,0 +1,68 @@
+{
+  "name": "@nerdcash/medusa-payment-zcash",
+  "version": "0.1.0",
+  "description": "Medusa payment provider for shielded Zcash through your own zcash-payment-service. No middleman, no fees.",
+  "license": "MIT",
+  "author": "Andrew Arnott",
+  "files": [
+    ".medusa/server",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    "./providers/*": "./.medusa/server/src/providers/*/index.js",
+    "./admin": {
+      "import": "./.medusa/server/src/admin/index.mjs",
+      "require": "./.medusa/server/src/admin/index.js",
+      "default": "./.medusa/server/src/admin/index.js"
+    },
+    "./*": "./.medusa/server/src/*.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nerdcash/zcash-payment-service.git",
+    "directory": "plugins/medusa"
+  },
+  "homepage": "https://github.com/nerdcash/zcash-payment-service/tree/main/plugins/medusa#readme",
+  "bugs": "https://github.com/nerdcash/zcash-payment-service/issues",
+  "keywords": [
+    "medusa-plugin",
+    "medusa-plugin-payment",
+    "medusa-v2",
+    "zcash",
+    "zec",
+    "payments"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "medusa plugin:build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "prepublishOnly": "medusa plugin:build"
+  },
+  "peerDependencies": {
+    "@medusajs/framework": "^2.10.0",
+    "@medusajs/medusa": "^2.10.0",
+    "@medusajs/admin-sdk": "^2.10.0",
+    "@medusajs/ui": "^4.0.0"
+  },
+  "devDependencies": {
+    "@medusajs/admin-sdk": "^2.22.2",
+    "@medusajs/cli": "2.22.2",
+    "@medusajs/framework": "2.22.2",
+    "@medusajs/medusa": "2.22.2",
+    "@medusajs/ui": "^4.2.9",
+    "@types/node": "24.19.2",
+    "@types/react": "^18.3.12",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

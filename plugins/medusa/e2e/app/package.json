@@ -1,0 +1,23 @@
+{
+  "name": "zcash-medusa-e2e-store",
+  "private": true,
+  "scripts": {
+    "seed": "medusa exec ./src/scripts/seed.ts",
+    "dev": "medusa develop"
+  },
+  "dependencies": {
+    "@medusajs/admin-sdk": "2.22.2",
+    "@medusajs/cli": "2.22.2",
+    "@medusajs/framework": "2.22.2",
+    "@medusajs/medusa": "2.22.2",
+    "@medusajs/ui": "4.2.9",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@swc/core": "1.16.21",
+    "@types/node": "24.19.2",
+    "ts-node": "^10.9.2",
+    "typescript": "5.9.3"
+  }
+}
