@@ -51,7 +51,11 @@ pub fn qr_svg(text: &str) -> Result<String, AppError> {
 }
 
 pub fn render_pay_page(status: &PaymentStatusResponse) -> Result<String, AppError> {
-    let qr = qr_svg(&status.qr_text)?;
+    // A very long message can make the URI too big for a QR code. Still serve the page so the
+    // payer can use the wallet link or copy the address.
+    let qr = qr_svg(&status.qr_text).unwrap_or_else(|_| {
+        r#"<p class="message">The payment request is too long for a QR code. Use the wallet link or copy the address below.</p>"#.to_string()
+    });
     let title = status.label.as_deref().unwrap_or("Pay with Zcash");
     let amount = match status.amount.as_deref() {
         Some(amount) => format!(
@@ -120,14 +124,16 @@ h1 {{ font-size: 1.25rem; margin: 0 0 .5rem; }}
   }};
   const statusEl = document.getElementById("status");
   const totalEl = document.getElementById("total");
-  const done = (s) => s === "paid" || s === "received";
+  const done = (s) => (s === "paid" || s === "received") && !!data.returnUrl;
   const show = (s, total) => {{
     statusEl.dataset.status = s;
     statusEl.textContent = labels[s] || s;
-    if (total && Number(total) > 0) totalEl.textContent = "Received so far: " + total + " ZEC";
+    totalEl.textContent = total && Number(total) > 0 ? "Received so far: " + total + " ZEC" : "";
   }};
+  // Stop polling only when leaving for the return URL. Otherwise keep the shown state current,
+  // since an unconfirmed receipt can still be dropped.
   const finish = () => {{
-    if (data.returnUrl) setTimeout(() => {{ window.location.assign(data.returnUrl); }}, 1500);
+    setTimeout(() => {{ window.location.assign(data.returnUrl); }}, 1500);
   }};
   if (done(data.status)) {{ finish(); return; }}
   const poll = async () => {{
@@ -194,6 +200,27 @@ pub fn escape_html(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{escape_html, qr_svg};
+
+    #[test]
+    fn page_renders_without_qr_when_request_is_too_long() {
+        let status = crate::service::PaymentStatusResponse {
+            payment_id: "0".repeat(32),
+            address: "utest1example".into(),
+            qr_text: format!("zcash:utest1example?message={}", "a".repeat(8000)),
+            pay_url: "/pay/x".into(),
+            label: None,
+            message: None,
+            amount: None,
+            total_received: "0.00000000".into(),
+            state_version: 0,
+            status: crate::service::PaymentStatus::AwaitingPayment,
+            return_url: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let html = super::render_pay_page(&status).unwrap();
+        assert!(html.contains("too long for a QR code"));
+        assert!(html.contains("utest1example"));
+    }
 
     #[test]
     fn escapes_html_special_characters() {

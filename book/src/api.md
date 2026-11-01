@@ -177,7 +177,7 @@ Delivery outcomes are in the [integration guide](integration.md#retries). On sta
 | `SYNC_POLL_INTERVAL_SECONDS` | `5` | `u64`, must be greater than 0. Fallback delay when the mempool stream is unavailable. |
 | `ZCASH_WEBHOOK_URL` | unset | Absolute `http` or `https` URL with a host. |
 | `ZCASH_WEBHOOK_SECRET` | unset | HMAC key. Delivery runs only when this and the URL are both set. |
-| `PUBLIC_BASE_URL` | unset | Absolute `http(s)` URL, trailing `/` removed. Prefix for `pay_url`. See [Payment links](pay-page.md#exposing-the-page). |
+| `PUBLIC_BASE_URL` | unset | Absolute `http(s)` URL with an optional path prefix and no query or fragment; trailing `/` removed. Prefix for `pay_url`. See [Payment links](pay-page.md#exposing-the-page). |
 | `WEBHOOK_POLL_INTERVAL_SECONDS` | `2` | `u64`, greater than 0. |
 | `WEBHOOK_RETRY_DELAY_SECONDS` | `30` | `u64`, greater than 0. Base of the exponential backoff. |
 | `WEBHOOK_RETRY_MAX_DELAY_SECONDS` | `300` | `u64`, greater than 0. Cap on the backoff. |
@@ -201,7 +201,7 @@ A value that fails its parse or range check returns `InvalidConfig` and the proc
 - `ZCASH_WEBHOOK_URL must be an absolute http(s) URL; got ...`
 - `ZCASH_WEBHOOK_URL must use http or https; got ...`
 - `ZCASH_WEBHOOK_URL must include a host; got ...`
-- the same four messages for `PUBLIC_BASE_URL`
+- the same four messages for `PUBLIC_BASE_URL`, plus `PUBLIC_BASE_URL must not include a query or fragment; got ...`
 
 Setting the URL without the secret, or the secret without the URL, is allowed. The webhook worker stays off.
 
