@@ -178,7 +178,9 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 		}
 		$status  = (int) wp_remote_retrieve_response_code( $response );
 		$session = json_decode( (string) wp_remote_retrieve_body( $response ), true );
-		if ( 200 !== $status || ! is_array( $session ) || empty( $session['address'] ) || empty( $session['qr_text'] ) ) {
+		if ( 200 !== $status || ! is_array( $session ) || empty( $session['address'] ) || empty( $session['qr_text'] )
+			|| ! is_string( $session['payment_id'] ?? null ) || ! ctype_xdigit( $session['payment_id'] ) ) {
+			// The webhook confirms funds through GET /payments/{payment_id}, so a session needs one.
 			wc_get_logger()->error( 'zcash-payment-service returned HTTP ' . $status . ': ' . substr( (string) wp_remote_retrieve_body( $response ), 0, 300 ), array( 'source' => self::ID ) );
 			return $this->fail( __( 'Zcash payments are temporarily unavailable. Please try again.', 'zcash-payment-gateway' ) );
 		}
@@ -236,6 +238,7 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 		echo '<section class="zcash-payment-details"><h2>' . esc_html__( 'Pay with Zcash', 'zcash-payment-gateway' ) . '</h2>';
 		// Payments sent now would only be set aside by the webhook, so don't ask for one.
 		if ( $order->get_meta( self::META_NEEDS_REVIEW )
+			|| ( $order->has_status( 'on-hold' ) && ! $order->get_meta( self::META_AUTO_HOLD ) )
 			|| (string) $order->get_meta( self::META_PRICED ) !== $order->get_total() . ' ' . $order->get_currency() ) {
 			echo '<p>' . esc_html__( 'This payment needs review by the store. Please contact the store before sending anything.', 'zcash-payment-gateway' ) . '</p></section>';
 			return;

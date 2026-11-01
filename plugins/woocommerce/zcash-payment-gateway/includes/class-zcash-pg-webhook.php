@@ -15,6 +15,11 @@ final class Zcash_PG_Webhook {
 		add_action(
 			'woocommerce_order_status_changed',
 			static function ( $order_id, $from, $to, $order ) {
+				if ( $order instanceof WC_Order && 'on-hold' === $from && $order->get_meta( Zcash_PG_Gateway::META_AUTO_HOLD ) ) {
+					// The plugin's hold has ended; a later hold is the merchant's own.
+					$order->delete_meta_data( Zcash_PG_Gateway::META_AUTO_HOLD );
+					$order->save();
+				}
 				if ( $order instanceof WC_Order && in_array( $to, array( 'refunded', 'cancelled', 'failed' ), true )
 					&& (int) $order->get_meta( Zcash_PG_Gateway::META_RECEIVED_ZAT ) > 0 ) {
 					$order->update_meta_data( Zcash_PG_Gateway::META_NEEDS_REVIEW, '1' );
@@ -178,9 +183,15 @@ final class Zcash_PG_Webhook {
 				);
 				return new WP_REST_Response( array( 'ok' => true, 'ignored' => 'superseded' ), 200 );
 			}
-			$order->delete_meta_data( Zcash_PG_Gateway::META_AUTO_HOLD );
+			// The status request took time: re-read so a cancellation made meanwhile wins.
+			$order = wc_get_order( $order->get_id() );
+			if ( ! $order || $order->is_paid() || ! $order->has_status( array( 'pending', 'on-hold' ) ) ) {
+				return new WP_REST_Response( array( 'error' => 'order changed, retry' ), 503 );
+			}
 			$order->update_meta_data( Zcash_PG_Gateway::META_RECEIVED_ZAT, (string) $total );
 			$order->save();
+			// payment_complete() leaves on-hold, which clears the auto-hold marker via the
+			// status hook only once the transition has succeeded.
 			if ( ! $order->payment_complete( $observation['event_id'] ) ) {
 				// Leave the version unchanged so the service's retry is applied.
 				return new WP_REST_Response( array( 'error' => 'could not complete payment' ), 500 );
