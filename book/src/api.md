@@ -182,7 +182,7 @@ Delivery outcomes are in the [integration guide](integration.md#retries). On sta
 | `ZCASH_WEBHOOK_URL` | unset | Absolute `http` or `https` URL with a host. |
 | `ZCASH_WEBHOOK_SECRET` | unset | HMAC key. Delivery runs only when this and the URL are both set. |
 | `PUBLIC_BASE_URL` | unset | Absolute `http(s)` URL with an optional path prefix and no query or fragment; trailing `/` removed. Prefix for `pay_url`. See [Payment links](pay-page.md#exposing-the-page). |
-| `ZCASH_DEV_SIMULATED_PAYMENTS` | `false` | `true`/`false`/`1`/`0`. Enables `POST /dev/simulate-payment`. Rejected unless `ZCASH_NETWORK=testnet` and `LIGHTWALLETD_URL` is unset (no real scanning runs alongside it). For tests only. |
+| `ZCASH_DEV_SIMULATED_PAYMENTS` | `false` | `true`/`false`/`1`/`0`. Enables `POST /dev/simulate-payment`. Rejected unless `ZCASH_NETWORK=testnet` and `LIGHTWALLETD_URL` is unset (no real scanning runs alongside it). For tests only. A database that ever recorded a simulated payment is marked, and the service refuses to start on it with `LIGHTWALLETD_URL` set; use a fresh database for real scanning. |
 | `RETURN_URL_ALLOWED_ORIGINS` | unset | Comma-separated `http(s)` origins (no path) a session's `return_url` must match. Unset allows any `http(s)` URL. See [Payment links](pay-page.md). |
 | `WEBHOOK_POLL_INTERVAL_SECONDS` | `2` | `u64`, greater than 0. |
 | `WEBHOOK_RETRY_DELAY_SECONDS` | `30` | `u64`, greater than 0. Base of the exponential backoff. |

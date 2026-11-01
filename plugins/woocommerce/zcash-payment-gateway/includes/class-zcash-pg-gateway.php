@@ -19,6 +19,7 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 	const META_PRICED         = '_zcash_priced_total';
 	const META_NEEDS_REVIEW   = '_zcash_needs_review';
 	const META_AUTO_HOLD      = '_zcash_auto_hold';
+	const META_PRE_HOLD       = '_zcash_pre_hold_status';
 
 	public function __construct() {
 		$this->id                 = self::ID;
@@ -188,7 +189,10 @@ class Zcash_PG_Gateway extends WC_Payment_Gateway {
 		// The request took time and the lock only covers this plugin: re-read, and give up if
 		// the order was closed or repriced meanwhile. The new address stays unused.
 		$order = wc_get_order( $order->get_id() );
-		if ( ! $order || $order->is_paid() || $order->has_status( array( 'cancelled', 'failed', 'refunded' ) )
+		// A hold placed meanwhile is the merchant's, and a switch to another gateway abandons
+		// this session; neither may be overwritten by the pending transition below.
+		if ( ! $order || $order->is_paid() || $order->has_status( array( 'cancelled', 'failed', 'refunded', 'on-hold' ) )
+			|| self::ID !== $order->get_payment_method()
 			|| $order->get_total() . ' ' . $order->get_currency() !== $priced ) {
 			return $this->fail( __( 'This order changed while payment was starting. Please try again or contact the store.', 'zcash-payment-gateway' ) );
 		}

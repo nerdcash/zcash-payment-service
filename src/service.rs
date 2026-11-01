@@ -107,6 +107,12 @@ impl PaymentService {
         let wallet_view =
             WalletView::decode(&wallet_identity.network, &wallet_identity.canonical_uivk)?;
 
+        if config.lightwalletd_url.is_some() && app_db.has_simulated_data()? {
+            return Err(AppError::StartupIntegrity(
+                "this database holds simulated payments (ZCASH_DEV_SIMULATED_PAYMENTS); use a fresh database for real scanning".into(),
+            ));
+        }
+
         if let Some(wallet_db_identity) = read_wallet_db_identity(&config.wallet_db_path)? {
             if wallet_db_identity.uivk != wallet_view.encoded_uivk() {
                 return Err(AppError::StartupIntegrity(
@@ -210,6 +216,8 @@ impl PaymentService {
             .app_db
             .find_issued_address(&request.address)?
             .ok_or_else(|| AppError::NotFound("unknown address".into()))?;
+        // Mark first, so the database is flagged even if recording the receipt fails partway.
+        self.app_db.mark_simulated_data()?;
         let txid_hex = hex_string(&{
             let mut bytes = [0u8; 32];
             UnwrapErr(SysRng).fill_bytes(&mut bytes);
@@ -1030,7 +1038,7 @@ mod tests {
         config.network = "testnet".into();
         config.startup_uivk = Some(TESTNET_UIVK.into());
         config.dev_simulated_payments = true;
-        let service = PaymentService::initialize(config).unwrap();
+        let service = PaymentService::initialize(config.clone()).unwrap();
         let session = service
             .issue_payment_session(session_request(Some("0.5"), None))
             .unwrap();
@@ -1067,6 +1075,15 @@ mod tests {
         assert!(matches!(
             simulate(&service, "u1unknown", "1").unwrap_err(),
             AppError::NotFound(_)
+        ));
+
+        // The same database can't be reused for real scanning.
+        drop(service);
+        config.dev_simulated_payments = false;
+        config.lightwalletd_url = Some("https://lwd.example:443".into());
+        assert!(matches!(
+            PaymentService::initialize(config),
+            Err(AppError::StartupIntegrity(_))
         ));
     }
 }

@@ -342,6 +342,29 @@ impl AppDb {
         }
     }
 
+    /// Records that this database holds simulated receipts. The marker is never cleared, so a
+    /// real scanner refuses to run against the database until it is discarded.
+    pub fn mark_simulated_data(&self) -> Result<(), AppError> {
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT OR IGNORE INTO simulated_data_marker (singleton_id, first_simulated_at) VALUES (1, ?1)",
+            params![now_rfc3339()?],
+        )?;
+        Ok(())
+    }
+
+    pub fn has_simulated_data(&self) -> Result<bool, AppError> {
+        let conn = self.connect()?;
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM simulated_data_marker WHERE singleton_id = 1",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     pub fn current_service_metadata(&self) -> Result<ServiceMetadata, AppError> {
         self.service_metadata()?
             .ok_or_else(|| AppError::InvalidConfig("service metadata is missing".into()))
@@ -1529,6 +1552,10 @@ impl AppDb {
                 startup_uivk_required INTEGER NOT NULL DEFAULT 1
             );
 
+            CREATE TABLE IF NOT EXISTS simulated_data_marker (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                first_simulated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS service_metadata (
                 singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
                 app_schema_version INTEGER NOT NULL,

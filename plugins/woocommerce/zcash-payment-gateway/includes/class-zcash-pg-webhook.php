@@ -29,10 +29,13 @@ final class Zcash_PG_Webhook {
 				if ( $order instanceof WC_Order && 'on-hold' === $from && $order->get_meta( Zcash_PG_Gateway::META_AUTO_HOLD ) ) {
 					// The plugin's hold has ended; a later hold is the merchant's own.
 					$order->delete_meta_data( Zcash_PG_Gateway::META_AUTO_HOLD );
+					$order->delete_meta_data( Zcash_PG_Gateway::META_PRE_HOLD );
 					$order->save();
 				}
 				if ( $order instanceof WC_Order && in_array( $to, array( 'refunded', 'cancelled', 'failed' ), true )
-					&& (int) $order->get_meta( Zcash_PG_Gateway::META_RECEIVED_ZAT ) > 0 ) {
+					&& $order->get_meta( Zcash_PG_Gateway::META_ADDRESS ) ) {
+					// Funds may have reached the service while their webhook is still queued, so
+					// the locally recorded balance can't rule them out.
 					$order->update_meta_data( Zcash_PG_Gateway::META_NEEDS_REVIEW, '1' );
 					$order->save();
 				}
@@ -146,6 +149,19 @@ final class Zcash_PG_Webhook {
 			wc_get_logger()->warning( 'Order ' . $order->get_id() . ': ' . $review_note, array( 'source' => Zcash_PG_Gateway::ID ) );
 			$order->add_order_note( $review_note );
 			$order->update_meta_data( Zcash_PG_Gateway::META_NEEDS_REVIEW, '1' );
+			if ( $order->is_paid() && $due > 0 && $total < $due ) {
+				// Review doesn't make an underfunded paid order safe to fulfill: hold it too,
+				// keeping the review flag so later receipts still wait for the merchant.
+				self::auto_hold(
+					$order,
+					sprintf(
+						/* translators: 1: received ZEC, 2: due ZEC */
+						__( 'Zcash funds for this paid order dropped to %1$s of %2$s ZEC. Order put on hold; check before fulfilling.', 'zcash-payment-gateway' ),
+						$zec,
+						Zcash_PG_Util::zat_to_zec( $due )
+					)
+				);
+			}
 		} elseif ( $order->is_paid() ) {
 			if ( $due > 0 && $total < $due ) {
 				// A receipt was dropped (expired from the mempool or undone by a reorg).
@@ -156,8 +172,7 @@ final class Zcash_PG_Webhook {
 					Zcash_PG_Util::zat_to_zec( $due )
 				);
 				wc_get_logger()->warning( 'Order ' . $order->get_id() . ': ' . $message, array( 'source' => Zcash_PG_Gateway::ID ) );
-				$order->update_meta_data( Zcash_PG_Gateway::META_AUTO_HOLD, '1' );
-				$order->update_status( 'on-hold', $message );
+				self::auto_hold( $order, $message );
 			} else {
 				/* translators: %s: ZEC total */
 				$order->add_order_note( sprintf( __( 'Zcash total for this order is now %s ZEC.', 'zcash-payment-gateway' ), $zec ) );
@@ -206,14 +221,27 @@ final class Zcash_PG_Webhook {
 			}
 			$order->update_meta_data( Zcash_PG_Gateway::META_RECEIVED_ZAT, (string) $total );
 			$order->save();
-			// payment_complete() leaves on-hold, which clears the auto-hold marker via the
-			// status hook only once the transition has succeeded.
-			if ( ! $order->payment_complete( $observation['event_id'] ) ) {
-				// Leave the version unchanged so the service's retry is applied.
-				return new WP_REST_Response( array( 'error' => 'could not complete payment' ), 500 );
+			$pre_hold = (string) $order->get_meta( Zcash_PG_Gateway::META_PRE_HOLD );
+			if ( $order->has_status( 'on-hold' ) && '' !== $pre_hold ) {
+				// Recovering from the plugin's own hold on an order that was already paid: restore
+				// its earlier status rather than completing the payment again, which would rerun
+				// payment-complete hooks and could send a Completed order back to Processing.
+				// Leaving on-hold clears both hold markers via the status hook.
+				$order->update_status(
+					$pre_hold,
+					/* translators: %s: ZEC total */
+					sprintf( __( 'Zcash funds recovered to %s ZEC. Hold released.', 'zcash-payment-gateway' ), $zec )
+				);
+			} else {
+				// payment_complete() leaves on-hold, which clears the auto-hold marker via the
+				// status hook only once the transition has succeeded.
+				if ( ! $order->payment_complete( $observation['event_id'] ) ) {
+					// Leave the version unchanged so the service's retry is applied.
+					return new WP_REST_Response( array( 'error' => 'could not complete payment' ), 500 );
+				}
+				/* translators: %s: ZEC total */
+				$order->add_order_note( sprintf( __( 'Received %s ZEC. Payment complete.', 'zcash-payment-gateway' ), $zec ) );
 			}
-			/* translators: %s: ZEC total */
-			$order->add_order_note( sprintf( __( 'Received %s ZEC. Payment complete.', 'zcash-payment-gateway' ), $zec ) );
 		} else {
 			$order->add_order_note(
 				sprintf(
@@ -233,7 +261,18 @@ final class Zcash_PG_Webhook {
 		return new WP_REST_Response( array( 'ok' => true ), 200 );
 	}
 
-	/** Finds the order an address was issued for, on both HPOS and legacy post storage. */
+	/** Puts a paid order on hold, remembering its status so recovery can restore it. */
+	private static function auto_hold( WC_Order $order, string $message ): void {
+		if ( $order->has_status( 'on-hold' ) ) {
+			$order->add_order_note( $message );
+			return;
+		}
+		$order->update_meta_data( Zcash_PG_Gateway::META_AUTO_HOLD, '1' );
+		$order->update_meta_data( Zcash_PG_Gateway::META_PRE_HOLD, $order->get_status() );
+		$order->update_status( 'on-hold', $message );
+	}
+
+		/** Finds the order an address was issued for, on both HPOS and legacy post storage. */
 	private static function find_order( string $address ): ?WC_Order {
 		$args = array(
 			'limit'  => 1,
