@@ -20,6 +20,12 @@
       "matchManagers": ["dockerfile", "docker-compose"],
       "groupName": "docker images",
       "groupSlug": "docker-images"
+    },
+    {
+      "description": "Medusa's build tooling (medusa build / plugin:build) calls the TypeScript compiler API, which TypeScript 7 no longer ships. Hold the Medusa plugin and its e2e app on TypeScript 5.x until Medusa supports TypeScript 7.",
+      "matchFileNames": ["plugins/medusa/**"],
+      "matchPackageNames": ["typescript"],
+      "allowedVersions": "<6"
     }
   ]
 }
