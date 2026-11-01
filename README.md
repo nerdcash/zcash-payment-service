@@ -35,6 +35,14 @@ The guide at **[nerdcash.github.io/zcash-payment-service](https://nerdcash.githu
 npm install @nerdcash/zcash-payment-client
 ```
 
+## Store plugins
+
+These plugins connect a store to your own copy of the service:
+
+- **WooCommerce**: [`plugins/woocommerce`](plugins/woocommerce) ([docs](https://nerdcash.github.io/zcash-payment-service/woocommerce.html))
+- **Medusa**: [`plugins/medusa`](plugins/medusa) ([docs](https://nerdcash.github.io/zcash-payment-service/medusa.html))
+- **Vendure**: [`plugins/vendure`](plugins/vendure) ([docs](https://nerdcash.github.io/zcash-payment-service/vendure.html))
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the repo layout, development commands, and how to keep the service, client, and docs in sync.
