@@ -10,6 +10,8 @@ its clients, and the docs stay in sync.
 | --- | --- | --- | --- |
 | Payment service (Rust crate + binary) | `Cargo.toml`, `src/` | Rust crate, and the Docker image `ghcr.io/nerdcash/zcash-payment-service` | `.github/workflows/ci.yml`: every push to `main` that touches service code pushes `:main` and `:<commit sha>` tags. `.github/workflows/release.yml`: pushing a `v<version>` tag that matches `Cargo.toml` pushes `:v<version>` and `:<version>`, and for a stable version also `:<major>.<minor>` (if it is the newest patch in that series) and `:latest` (if it is the newest stable release) |
 | Node client | `clients/node/` | npm package `@nerdcash/zcash-payment-client` | `.github/workflows/publish-node-client.yml`: pushing a `client-node-v<version>` tag publishes to npm with trusted publishing and provenance |
+| Medusa plugin | `plugins/medusa/` | npm package `@nerdcash/medusa-payment-zcash` | `.github/workflows/publish-medusa-plugin.yml`: pushing a `medusa-v<version>` tag publishes to npm with trusted publishing and provenance |
+| Vendure plugin | `plugins/vendure/` | npm package `@nerdcash/vendure-payment-zcash` | `.github/workflows/publish-vendure-plugin.yml`: pushing a `vendure-v<version>` tag publishes to npm with trusted publishing and provenance |
 | Guide (mdBook) | `book/` | GitHub Pages site | `.github/workflows/pages.yml`: every push to `main` |
 | Reference docs | `README.md`, `docs/`, `design.md`, `src/spec.md`, `specs/` | Read in the repo | n/a |
 
@@ -45,6 +47,47 @@ backward compatible, say so in the PR description and describe how deployed stor
   The workflow fails if the tag does not match `package.json`.
 - If the client starts relying on new service behavior, note the minimum service version in
   the client README.
+
+## Publishing the npm plugins
+
+The Medusa and Vendure plugins publish the same way as the Node client. They call the service's
+HTTP API directly and don't depend on `@nerdcash/zcash-payment-client`, so they can be released
+in any order relative to it.
+
+To release a new version after merge:
+
+1. Bump `version` in `plugins/<medusa|vendure>/package.json` and run `npm install` there to update
+   the lockfile, in a PR.
+2. After it merges, tag the merged commit on `main` (not your local branch) and push the tag:
+   `git fetch origin && git tag medusa-v<version> origin/main && git push origin medusa-v<version>`
+   (or `vendure-v<version>`).
+   The workflow fails if the tag does not match `package.json`. It runs the typecheck and tests,
+   builds through `prepack`, and publishes with provenance.
+
+Check the tarball before a release with `npm pack --dry-run` in the plugin directory. It should
+contain only the build output (`.medusa/server` or `dist`), `README.md`, `LICENSE`, and
+`package.json`.
+
+### First release of a new package
+
+npm trusted publishing can be configured only for a package that already exists, so the first
+version of each package is published by hand from a clean checkout of `main`:
+
+```sh
+npm login
+cd plugins/medusa   # or plugins/vendure
+npm ci
+npm test
+npm publish --access public
+```
+
+Then on npmjs.com, open the package's Settings, add a trusted publisher of type GitHub Actions,
+and enter organization or user `nerdcash`, repository `zcash-payment-service`, workflow filename
+`publish-medusa-plugin.yml` (or `publish-vendure-plugin.yml`), and environment `npm`. While there,
+you can set Publishing access to require two-factor authentication and disallow tokens.
+Then tag the hand-published version (`medusa-v0.1.0`, `vendure-v0.1.0`) so the tags record what
+was released; the workflow sees the version already on npm and skips publishing. From the next
+version on, pushing the tag publishes.
 
 ## Changing the service
 

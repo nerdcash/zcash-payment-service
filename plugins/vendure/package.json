@@ -2,14 +2,28 @@
   "name": "@nerdcash/vendure-payment-zcash",
   "version": "0.1.0",
   "description": "Zcash payments for Vendure through a self-hosted zcash-payment-service",
+  "keywords": [
+    "vendure",
+    "vendure-plugin",
+    "zcash",
+    "zec",
+    "payments"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/nerdcash/zcash-payment-service.git",
+    "url": "git+https://github.com/nerdcash/zcash-payment-service.git",
     "directory": "plugins/vendure"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist",
     "README.md",
@@ -18,7 +32,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test test/*.test.ts",
+    "prepack": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && npm run build"
   },
   "peerDependencies": {
     "@vendure/core": "^3.0.0",
@@ -32,5 +47,11 @@
     "@vendure/core": "3.8.1",
     "tsx": "4.23.15",
     "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

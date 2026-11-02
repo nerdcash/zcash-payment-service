@@ -1,0 +1,64 @@
+name: Publish Vendure plugin
+
+# Publishes plugins/vendure (@nerdcash/vendure-payment-zcash) to npm with trusted publishing (OIDC). No npm token is
+# stored in this repo. Trigger: push a tag named vendure-v<version> that matches
+# plugins/vendure/package.json. See CONTRIBUTING.md for the release steps.
+
+on:
+  push:
+    tags:
+      - "vendure-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write # required for npm trusted publishing and provenance
+    defaults:
+      run:
+        working-directory: plugins/vendure
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@^11.5.1
+      - name: Check tag matches package version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "vendure-v$version" ]; then
+            echo "::error::Tag $TAG does not match package version $version"
+            exit 1
+          fi
+      # The first version of a package is published by hand (see CONTRIBUTING.md), so its tag
+      # finds the version already on npm and skips publishing instead of failing.
+      - name: Check whether this version is already published
+        id: published
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "::notice::$name@$version is already on npm; skipping publish"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      # prepack builds the package before it is packed.
+      - if: steps.published.outputs.exists != 'true'
+        run: npm publish --provenance --access public

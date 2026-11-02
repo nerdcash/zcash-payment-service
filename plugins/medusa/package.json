@@ -44,7 +44,7 @@
     "build": "medusa plugin:build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
-    "prepublishOnly": "medusa plugin:build"
+    "prepack": "medusa plugin:build"
   },
   "peerDependencies": {
     "@medusajs/framework": "^2.22.0",
