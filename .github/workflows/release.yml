@@ -13,7 +13,8 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      # Only v followed by a digit: a bare "v*" also matches plugin tags such as vendure-v0.1.0.
+      - "v[0-9]*"
 
 permissions:
   contents: read
@@ -60,7 +61,7 @@ jobs:
           prerelease="${BASH_REMATCH[4]}"
           git fetch --quiet --force --tags origin
           stable='^v[0-9]+\.[0-9]+\.[0-9]+$'
-          newest="$(git tag -l 'v*' | grep -E "$stable" | sort -V | tail -n1 || true)"
+          newest="$(git tag -l 'v[0-9]*' | grep -E "$stable" | sort -V | tail -n1 || true)"
           newest_in_minor="$(git tag -l "v$major.$minor.*" | grep -E "$stable" | sort -V | tail -n1 || true)"
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/zcash-payment-service"
           {
