@@ -33,7 +33,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
-    "prepack": "npm run build"
+    "prepack": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && npm run build"
   },
   "peerDependencies": {
     "@vendure/core": "^3.0.0",

@@ -58,8 +58,9 @@ To release a new version after merge:
 
 1. Bump `version` in `plugins/<medusa|vendure>/package.json` and run `npm install` there to update
    the lockfile, in a PR.
-2. After it merges, tag `main` and push the tag:
-   `git tag medusa-v<version> && git push origin medusa-v<version>` (or `vendure-v<version>`).
+2. After it merges, tag the merged commit on `main` (not your local branch) and push the tag:
+   `git fetch origin && git tag medusa-v<version> origin/main && git push origin medusa-v<version>`
+   (or `vendure-v<version>`).
    The workflow fails if the tag does not match `package.json`. It runs the typecheck and tests,
    builds through `prepack`, and publishes with provenance.
 
