@@ -92,10 +92,10 @@ The CI workflow pushes, on a `main` push or a manual run of that workflow on `ma
 - `ghcr.io/nerdcash/zcash-payment-service:<git sha>`
 - `ghcr.io/nerdcash/zcash-payment-service:main`
 
-The image name is `ghcr.io/` plus the lowercased repository owner plus `/zcash-payment-service`. The cleanup workflow keeps the `main` tag and the five newest SHA tags.
+The image name is `ghcr.io/` plus the lowercased repository owner plus `/zcash-payment-service`. The cleanup workflow keeps the `main` tag, every release tag, and the five newest SHA tags. Production should use a release image, such as `0.1.0`:
 
 ```powershell
-docker pull ghcr.io/nerdcash/zcash-payment-service:main
+docker pull ghcr.io/nerdcash/zcash-payment-service:0.1.0
 ```
 
 Run the published image with the same settings the Compose file uses, and point `ZCASH_WEBHOOK_URL` at an endpoint your application serves:
@@ -103,7 +103,7 @@ Run the published image with the same settings the Compose file uses, and point 
 ```yaml
 services:
   zcash-payment-service:
-    image: ghcr.io/nerdcash/zcash-payment-service:main
+    image: ghcr.io/nerdcash/zcash-payment-service:0.1.0
     environment:
       PORT: "8787"
       APP_DATA_DIR: /data/zcash-payment

@@ -5,7 +5,7 @@ name: zcash-payment
 
 services:
   zcash-payment-service:
-    image: ghcr.io/nerdcash/zcash-payment-service:${IMAGE_TAG:-main}
+    image: ghcr.io/nerdcash/zcash-payment-service:${IMAGE_TAG:-0.1.0}
     restart: unless-stopped
     environment:
       PORT: 8787
