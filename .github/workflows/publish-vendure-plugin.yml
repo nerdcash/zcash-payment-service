@@ -44,21 +44,39 @@ jobs:
             exit 1
           fi
       # The first version of a package is published by hand (see CONTRIBUTING.md), so its tag
-      # finds the version already on npm and skips publishing instead of failing.
+      # finds the version already on npm and skips publishing instead of failing. This asks the
+      # registry anonymously with curl: `npm view` here goes through setup-node's .npmrc, whose
+      # placeholder token can make it fail, and right after a publish the registry can lag, so a
+      # miss is retried. The publish step below also treats "already published" as success.
       - name: Check whether this version is already published
         id: published
         run: |
           name="$(node -p "require('./package.json').name")"
           version="$(node -p "require('./package.json').version")"
-          if npm view "$name@$version" version >/dev/null 2>&1; then
+          url="https://registry.npmjs.org/${name/\//%2f}/$version"
+          exists=false
+          for attempt in 1 2 3 4 5; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Cache-Control: no-cache' "$url" || true)"
+            if [ "$code" = 200 ]; then exists=true; break; fi
+            [ "$attempt" = 5 ] || sleep 10
+          done
+          if [ "$exists" = true ]; then
             echo "::notice::$name@$version is already on npm; skipping publish"
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
+          echo "exists=$exists" >> "$GITHUB_OUTPUT"
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test
       # prepack builds the package before it is packed.
-      - if: steps.published.outputs.exists != 'true'
-        run: npm publish --provenance --access public
+      - name: Publish
+        if: steps.published.outputs.exists != 'true'
+        run: |
+          set +e
+          npm publish --provenance --access public 2>&1 | tee "$RUNNER_TEMP/publish.log"
+          status="${PIPESTATUS[0]}"
+          set -e
+          if [ "$status" != 0 ] && grep -q 'cannot publish over the previously published versions' "$RUNNER_TEMP/publish.log"; then
+            echo "::notice::This version is already on npm; nothing to publish"
+            exit 0
+          fi
+          exit "$status"
