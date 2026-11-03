@@ -4,7 +4,7 @@ name: zcash-prestashop-e2e
 
 services:
   db:
-    image: mysql:26.10@sha256:7b16ec7caa94ca7e92f4c5ec287de69d2e8738db056ceb629022951a6f6d910b
+    image: mysql:26.10@sha256:3819b2b23835c4a73c8b022fafc33c8095c0f81c929a8b7a84613d2fba6c52f5
     environment:
       MYSQL_DATABASE: prestashop
       MYSQL_USER: prestashop
@@ -17,19 +17,22 @@ services:
       retries: 40
 
   prestashop:
-    image: prestashop/prestashop:9.1.5-apache@sha256:515336e3c1c50c5613f7cd7382b384fa095fba9d7d8497c80aeb3046c135c535
+    image: prestashop/prestashop:9.2.0-apache@sha256:09c36d25a22fd52f6ab876e8d7564c2b6830ba27236f50ef770dc6a650a3208e
     depends_on:
       db:
         condition: service_healthy
     # PrestaShop redirects any request whose host isn't its shop domain, webhooks included. Apache
     # listens on the published port and the service shares this network namespace, so the service,
     # the browser, and the shop all use the same http://localhost:PORT address.
+    # PrestaShop 9.2's installer deletes install/ itself, and the image's start script then exits
+    # when its own rm finds nothing, so make that rm tolerate a missing folder.
     command:
       - sh
       - -c
       - >-
         sed -i "s/^Listen 80$$/Listen ${E2E_PS_PORT:-8080}/" /etc/apache2/ports.conf &&
         sed -i "s/:80>/:${E2E_PS_PORT:-8080}>/" /etc/apache2/sites-enabled/000-default.conf &&
+        sed -i 's|rm -r /var/www/html/$$PS_FOLDER_INSTALL/|rm -rf /var/www/html/$$PS_FOLDER_INSTALL/|' /tmp/docker_run.sh &&
         exec /tmp/docker_run.sh
     ports:
       - "127.0.0.1:${E2E_PS_PORT:-8080}:${E2E_PS_PORT:-8080}"
