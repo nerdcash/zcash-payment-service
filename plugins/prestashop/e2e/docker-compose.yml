@@ -4,7 +4,7 @@ name: zcash-prestashop-e2e
 
 services:
   db:
-    image: mysql:26.10@sha256:7b16ec7caa94ca7e92f4c5ec287de69d2e8738db056ceb629022951a6f6d910b
+    image: mysql:26.10@sha256:3819b2b23835c4a73c8b022fafc33c8095c0f81c929a8b7a84613d2fba6c52f5
     environment:
       MYSQL_DATABASE: prestashop
       MYSQL_USER: prestashop
@@ -17,7 +17,7 @@ services:
       retries: 40
 
   prestashop:
-    image: prestashop/prestashop:9.1.5-apache@sha256:515336e3c1c50c5613f7cd7382b384fa095fba9d7d8497c80aeb3046c135c535
+    image: prestashop/prestashop:9.2.0-apache@sha256:09c36d25a22fd52f6ab876e8d7564c2b6830ba27236f50ef770dc6a650a3208e
     depends_on:
       db:
         condition: service_healthy
