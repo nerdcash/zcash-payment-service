@@ -24,12 +24,15 @@ services:
     # PrestaShop redirects any request whose host isn't its shop domain, webhooks included. Apache
     # listens on the published port and the service shares this network namespace, so the service,
     # the browser, and the shop all use the same http://localhost:PORT address.
+    # PrestaShop 9.2's installer deletes install/ itself, and the image's start script then exits
+    # when its own rm finds nothing, so make that rm tolerate a missing folder.
     command:
       - sh
       - -c
       - >-
         sed -i "s/^Listen 80$$/Listen ${E2E_PS_PORT:-8080}/" /etc/apache2/ports.conf &&
         sed -i "s/:80>/:${E2E_PS_PORT:-8080}>/" /etc/apache2/sites-enabled/000-default.conf &&
+        sed -i 's|rm -r /var/www/html/$$PS_FOLDER_INSTALL/|rm -rf /var/www/html/$$PS_FOLDER_INSTALL/|' /tmp/docker_run.sh &&
         exec /tmp/docker_run.sh
     ports:
       - "127.0.0.1:${E2E_PS_PORT:-8080}:${E2E_PS_PORT:-8080}"
