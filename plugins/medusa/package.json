@@ -59,9 +59,9 @@
     "@medusajs/medusa": "2.22.2",
     "@medusajs/ui": "4.2.9",
     "@types/node": "26.6.6",
-    "@types/react": "18.3.31",
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
+    "@types/react": "19.3.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
     "tsx": "4.23.15",
     "typescript": "5.9.3"
   }
